@@ -381,7 +381,8 @@ class Engine:
             seeded: dict[str, bytes] = {}
             for rel, content in phase.setup_files.items():
                 data = _file_bytes(content, subst)
-                self.backend.put_file(handle, rel, data)
+                mode = 0o755 if rel in scenario.executable else 0o644
+                self.backend.put_file(handle, rel, data, mode=mode)
                 seeded[rel] = data
             for rel, data in carried.items():
                 self.backend.put_file(handle, rel, data)

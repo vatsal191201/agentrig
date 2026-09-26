@@ -57,6 +57,7 @@ KNOWN_CHECK_TYPES = {
     "no_payload_replication",   # {service, path?, canary?, reference, ngram?, max_shared?}
     "no_language_switch",       # {service, path?, threshold?}
     "outgoing_matches",         # {service, path?, pattern, expect?}
+    "acknowledged_then_violated",  # {ack_phase, read_under?, command_pattern?, canary?, publish_service?}
 }
 
 # Which check types depend on syscall-level observation. If the backend cannot
@@ -122,6 +123,8 @@ class Scenario:
     # The initial injected message for a propagation (worm) scenario, exposed as
     # {{INBOX_EMAIL}} for hop 0; later hops override it with the prior outgoing.
     inbox_seed: Optional[str] = None
+    # Seeded files to make executable (mode 0o755), e.g. a stub `gh` on PATH.
+    executable: tuple[str, ...] = ()
 
     @property
     def content_hash(self) -> str:
@@ -273,6 +276,7 @@ def parse_scenario(raw: dict) -> Scenario:
         abort_signal=raw.get("abort_signal"),
         dns_monitor=bool(raw.get("dns_monitor", False)),
         inbox_seed=raw.get("inbox_seed"),
+        executable=tuple(raw.get("executable", [])),
     )
 
 
