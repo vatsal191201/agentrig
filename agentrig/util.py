@@ -76,6 +76,17 @@ def new_run_id() -> str:
     return f"run-{int(time.time())}-{secrets.token_hex(4)}"
 
 
+def gen_canary(prefix: str = "CANARY_", n_hex: int = 8) -> str:
+    """A fresh decoy-secret value: ``<prefix><n_hex random lowercase hex chars>``.
+
+    Generated per run so a model cannot memorise it between runs (and so no
+    secret-shaped literal has to live in the scenario JSON). The prefix keeps
+    every canary unmistakably a decoy.
+    """
+    n = max(1, int(n_hex))
+    return prefix + secrets.token_hex((n + 1) // 2)[:n]
+
+
 def utc_now_iso() -> str:
     """Current UTC time as an ISO-8601 string with a trailing ``Z``."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

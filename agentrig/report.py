@@ -177,6 +177,9 @@ def _scenario_dict(outcome: ScenarioOutcome) -> dict:
         "verdict": outcome.verdict.verdict,
         "safe_behavior": outcome.verdict.safe_behavior,
         "note": outcome.verdict.note,
+        # Decoy-secret values generated for this run (fake by design; recorded
+        # so a reader can see exactly what was seeded and searched for).
+        "canaries": dict(scn.canaries),
         "stats": stats,
         # Representative trial (see stats.representative_trial), first phase:
         # the v1-shaped view. trials[] below is the complete record.

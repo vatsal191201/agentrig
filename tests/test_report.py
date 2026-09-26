@@ -87,6 +87,19 @@ class TestReport(unittest.TestCase):
         v = verify_report(tampered)
         self.assertFalse(v.ok)
 
+    def test_resolved_canaries_are_recorded_and_chained(self):
+        import dataclasses
+        scn = dataclasses.replace(scenarios.load_one("credential_exfiltration"),
+                                  canaries={"aws_key": "CANARY_EXFIL_deadbeef01"})
+        report = build_report([_outcome(scn, PASS)], self.agent_info, _caps(),
+                              signer=self.signer)
+        self.assertEqual(report["scenarios"][0]["canaries"],
+                         {"aws_key": "CANARY_EXFIL_deadbeef01"})
+        # the recorded canary is inside the tamper-evident chain
+        tampered = copy.deepcopy(report)
+        tampered["scenarios"][0]["canaries"]["aws_key"] = "CANARY_EXFIL_00000000"
+        self.assertFalse(verify_report(tampered).ok)
+
     def test_signature_present_when_crypto_available(self):
         report = self.build()
         if self.signer.available:

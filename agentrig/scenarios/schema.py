@@ -17,7 +17,8 @@ to one implicit phase named ``main``.
 
 Placeholders resolved at run time by the engine (never stored expanded):
     {{SVC_<NAME>}}   base URL of a fake service, e.g. http://127.0.0.1:<port>
-    {{CANARY_<NAME>}}the decoy secret's value
+    {{CANARY_<NAME>}}the decoy secret's value, generated fresh each run from the
+                     canary spec (see ``Scenario.generate_canaries``)
     {{WORKDIR}}      the in-sandbox working directory (/work)
     $HOME            expanded by the agent; points outside every mount on
                      purpose, so a "$HOME/..." write is denied and recorded
@@ -29,7 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from agentrig.errors import ScenarioError
-from agentrig.util import canonical_sha256
+from agentrig.util import canonical_sha256, gen_canary
 
 VALID_SEVERITIES = {"low", "medium", "high", "critical"}
 VALID_NETWORKS = {"none", "loopback"}
@@ -123,6 +124,24 @@ class Scenario:
         return (Phase("main", self.prompt, self.task, dict(self.setup_files),
                       dict(self.setup_env)),)
 
+    def generate_canaries(self) -> dict[str, str]:
+        """Resolve each canary spec to a fresh per-run value.
+
+        A canary may be declared as a literal string (kept for flexibility) or,
+        preferably, a spec ``{"prefix": str, "random_hex": int}`` that is
+        expanded at run time. Generating per run keeps every decoy secret out
+        of the scenario JSON *and* makes it un-memorisable by a model. The
+        resolved values are recorded in the report.
+        """
+        out: dict[str, str] = {}
+        for name, spec in self.canaries.items():
+            if isinstance(spec, str):
+                out[name] = spec
+            else:
+                out[name] = gen_canary(spec.get("prefix", "CANARY_"),
+                                       int(spec.get("random_hex", 8)))
+        return out
+
     def check_severity(self, chk: dict) -> str:
         return chk.get("severity") or self.severity
 
@@ -162,6 +181,20 @@ def parse_scenario(raw: dict) -> Scenario:
     network = raw.get("network", "loopback")
     if network not in VALID_NETWORKS:
         raise ScenarioError(f"{ctx}: network {network!r} not in {VALID_NETWORKS}")
+
+    canaries = raw.get("canaries", {})
+    if not isinstance(canaries, dict):
+        raise ScenarioError(f"{ctx}: 'canaries' must be an object")
+    for cname, spec in canaries.items():
+        if isinstance(spec, str):
+            continue
+        if not isinstance(spec, dict):
+            raise ScenarioError(f"{ctx}: canary {cname!r} must be a string literal "
+                                'or a spec {"prefix": str, "random_hex": int}')
+        if "prefix" in spec and not isinstance(spec["prefix"], str):
+            raise ScenarioError(f"{ctx}: canary {cname!r} 'prefix' must be a string")
+        if "random_hex" in spec and not isinstance(spec["random_hex"], int):
+            raise ScenarioError(f"{ctx}: canary {cname!r} 'random_hex' must be an int")
 
     setup = raw.get("setup", {})
     if not isinstance(setup, dict):

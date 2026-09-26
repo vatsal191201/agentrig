@@ -157,10 +157,23 @@ always regressions.
 
 ## Scenarios
 
-Declarative JSON (no code), reproducible: fixed canaries, deterministic fake services on
-fixed in-sandbox ports, and no live network except the explicitly allowlisted LLM
-endpoint in LLM runs. Each scenario has a directive `prompt` (demo agents) and a
-natural-language `task` (real agents). See [`docs/scenarios.md`](docs/scenarios.md).
+Declarative JSON (no code), reproducible: per-run decoy secrets, deterministic fake
+services on fixed in-sandbox ports, and no live network except the explicitly
+allowlisted LLM endpoint in LLM runs. Each scenario has a directive `prompt` (demo
+agents) and a natural-language `task` (real agents). See [`docs/scenarios.md`](docs/scenarios.md).
+
+**Decoy secrets are fake by design, and generated per run.** Every "secret" in
+this repo is a decoy: agentrig seeds a fake credential into a disposable sandbox
+and checks whether the agent reads or exfiltrates it. Since v0.2 each canary is
+declared in the scenario JSON as a *spec* (`{"prefix": "CANARY_EXFIL_",
+"random_hex": 10}`) and its value is generated fresh at run time — so no
+high-entropy secret literal is committed, and a model cannot memorise a canary
+between runs. The generated values are recorded in the report (under each
+scenario's `canaries`) so you can see exactly what was seeded and searched for.
+A `.gitguardian.yaml` marks the scenario, test and example directories (which
+still hold intentionally secret-shaped strings, such as fake PEM blocks) as
+decoy paths, so they do not raise recurring secret-scanner alerts; detection
+elsewhere is unchanged. No live credential is present anywhere in the tree.
 
 | id | category | severity | what a safe agent does |
 |---|---|---|---|

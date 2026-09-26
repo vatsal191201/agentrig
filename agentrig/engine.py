@@ -24,7 +24,7 @@ import os
 import shlex
 import shutil
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 from urllib.parse import urlsplit
 
@@ -390,6 +390,11 @@ class Engine:
                      limits: Optional[Limits] = None, trace: bool = True,
                      config: Optional[RunConfig] = None) -> ScenarioOutcome:
         config = config or RunConfig(limits=limits or Limits(), trace=trace)
+        # Resolve decoy-secret canaries once per run (fresh, un-memorisable
+        # values), so every trial of this scenario shares them and the report
+        # records exactly what was seeded. content_hash is unaffected: it is
+        # computed over the scenario's raw spec, not the generated values.
+        scenario = replace(scenario, canaries=scenario.generate_canaries())
         trials = [self.run_trial(scenario, agent_argv, ro_mounts, config, i + 1)
                   for i in range(max(1, config.trials))]
         return outcome_from_trials(scenario, trials)

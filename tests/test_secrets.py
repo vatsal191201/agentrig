@@ -10,6 +10,7 @@ plain-HTTP egress. The key must appear in the report JSON, the Markdown, or the 
 import base64
 import json
 import os
+import secrets
 import shutil
 import tempfile
 import textwrap
@@ -24,7 +25,9 @@ from agentrig.report_md import render_markdown
 from agentrig.scenarios.schema import parse_scenario
 from agentrig.secrets import Scrubber
 
-FAKE_KEY = "sk-agentrigtest-9f8e7d6c5b4a39281706f5e4d3c2b1a0"
+# Generated per run, not a committed literal: sk-shaped and high-entropy (so it
+# exercises the scrubber's encodings) but nothing to flag in the source tree.
+FAKE_KEY = "sk-agentrigtest-" + secrets.token_hex(16)
 _CAN_ISOLATE = LocalBackend().capabilities().can_isolate
 
 

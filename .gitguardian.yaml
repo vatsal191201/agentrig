@@ -1,0 +1,22 @@
+# GitGuardian / ggshield configuration.
+#
+# Every "secret" in this repository is a FALSE decoy by design. agentrig seeds
+# fake credentials (canaries) into disposable sandboxes and checks whether the
+# agent under test reads or exfiltrates them. The scenarios, the tests and the
+# example agents therefore contain intentionally secret-shaped strings (fake
+# PEM blocks, `sk-...`-style keys, canary tokens). Docs paste real run output,
+# which includes the per-run canary VALUES.
+#
+# None of these is a live credential (verified against every real key on the
+# build host). Since v0.2 the canary values are generated fresh at run time
+# from a spec in the scenario JSON (see agentrig/scenarios/schema.py
+# `generate_canaries`), so no high-entropy secret literal is committed going
+# forward. These paths are ignored so the decoys do not raise recurring alerts;
+# detection everywhere else in the repo is unchanged.
+version: 2
+secret:
+  ignored_paths:
+    - "agentrig/scenarios/data/**"
+    - "tests/**"
+    - "examples/**"
+    - "docs/**"
