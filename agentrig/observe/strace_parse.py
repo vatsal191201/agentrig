@@ -73,6 +73,17 @@ _MKDIR_RE = re.compile(
     r'mkdir(?:at)?\((?:(?P<dirfd>[^,"]+),\s*)?"(?P<path>(?:[^"\\]|\\.)*)"'
     r"(?:,[^)]*)?\)\s*=\s*(?P<ret>-?\d+)(?:\s+(?P<errno>E[A-Z0-9]+))?"
 )
+# link/linkat (hard links) and symlink/symlinkat. "link" also occurs inside
+# "unlink" and "symlink", hence the no-letter lookbehind.
+_LINK_RE = re.compile(
+    r'(?<![a-z])link(?:at)?\((?:(?P<d1>[^,"]+),\s*)?"(?P<src>(?:[^"\\]|\\.)*)",\s*'
+    r'(?:(?P<d2>[^,"]+),\s*)?"(?P<dst>(?:[^"\\]|\\.)*)"(?:,[^)]*)?\)\s*=\s*'
+    r"(?P<ret>-?\d+)(?:\s+(?P<errno>E[A-Z0-9]+))?"
+)
+_SYMLINK_RE = re.compile(
+    r'symlink(?:at)?\("(?P<target>(?:[^"\\]|\\.)*)",\s*(?:(?P<d2>[^,"]+),\s*)?'
+    r'"(?P<dst>(?:[^"\\]|\\.)*)"\)\s*=\s*(?P<ret>-?\d+)(?:\s+(?P<errno>E[A-Z0-9]+))?'
+)
 _ARGV_ITEM_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 _DIRFD_PATH_RE = re.compile(r"<(?P<p>[^>]*)>")
 
@@ -221,6 +232,24 @@ def _parse_body(body: str, workdir: str,
             return {"type": "file_write", "path": path, "op": "mkdir"}
         return {"type": "file_write_attempt_denied", "path": path,
                 "errno": m.group("errno") or "EACCES", "op": "mkdir"}
+    m = _SYMLINK_RE.search(body) or _LINK_RE.search(body)
+    if m:
+        # A new name for a file. Outside the workdir it is an out-of-scope
+        # write attempt; inside, a hard link is an *alias* whose reads count as
+        # reads of the original (symlink reads already resolve via -y).
+        dst = _resolve(_unescape(m.group("dst")), m.group("d2") or "", workdir)
+        hard = "src" in m.re.groupindex
+        if not _under(dst, (workdir,)):
+            if _under(dst, noise_write_roots):
+                return None
+            if m.group("ret") == "0":
+                return {"type": "file_write", "path": dst, "op": "link"}
+            return {"type": "file_write_attempt_denied", "path": dst,
+                    "errno": m.group("errno") or "EACCES", "op": "link"}
+        if hard and m.group("ret") == "0":
+            src = _resolve(_unescape(m.group("src")), m.group("d1") or "", workdir)
+            return {"type": "file_link", "src": src, "dst": dst}
+        return None
     m = _RENAME_RE.search(body)
     if m and m.group("ret") == "0":
         src = _resolve(_unescape(m.group("src")), "", workdir)

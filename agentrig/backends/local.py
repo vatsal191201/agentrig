@@ -43,7 +43,8 @@ from agentrig.errors import BackendError, IsolationError
 # to parse: file opens (reads *and* denied writes), execs, and network connects.
 TRACE_SYSCALLS = (
     "openat,open,openat2,connect,socket,execve,execveat,"
-    "unlink,unlinkat,rename,renameat,renameat2,mkdir,mkdirat"
+    "unlink,unlinkat,rename,renameat,renameat2,mkdir,mkdirat,"
+    "link,linkat,symlink,symlinkat"
 )
 
 # The in-sandbox launcher (loopback forwards + secret env), and the interpreter
