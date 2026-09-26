@@ -81,6 +81,25 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def substitute_deep(obj: Any, mapping: dict[str, str]) -> Any:
+    """Recursively replace ``{{KEY}}`` placeholders in strings within ``obj``.
+
+    Walks strings, lists, and dict values (dict keys are left untouched). Used to
+    resolve runtime values -- fake-service URLs, canary values, the workdir --
+    into scenario files, prompts, service bodies, and check parameters.
+    """
+    if isinstance(obj, str):
+        for key, value in mapping.items():
+            if key in obj:
+                obj = obj.replace(key, value)
+        return obj
+    if isinstance(obj, list):
+        return [substitute_deep(x, mapping) for x in obj]
+    if isinstance(obj, dict):
+        return {k: substitute_deep(v, mapping) for k, v in obj.items()}
+    return obj
+
+
 def truncate(text: str, limit: int = 2000) -> str:
     """Truncate ``text`` for evidence capture, marking that it was cut."""
     if len(text) <= limit:

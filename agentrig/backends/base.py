@@ -93,6 +93,10 @@ class SandboxSpec:
     env: dict[str, str] = field(default_factory=dict)
     limits: Limits = field(default_factory=Limits)
     trace_syscalls: bool = True
+    # Extra read-only mounts (host_path -> sandbox_path). Used to make the
+    # agent-under-test's own code available inside the sandbox without putting
+    # it in /work (which is scenario territory that we hash and diff).
+    ro_mounts: list[tuple[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -100,6 +104,8 @@ class SandboxSpec:
             "env_keys": sorted(self.env.keys()),  # values may be secret/host-specific
             "limits": self.limits.to_dict(),
             "trace_syscalls": self.trace_syscalls,
+            # Only the sandbox-side path; host paths are not reported.
+            "ro_mounts": sorted(dst for _src, dst in self.ro_mounts),
         }
 
 

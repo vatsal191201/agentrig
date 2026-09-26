@@ -313,6 +313,11 @@ class LocalBackend(SandboxBackend):
         if os.path.isdir("/etc"):
             args += ["--ro-bind", "/etc", "/etc"]
         args += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+        # Read-only mounts (e.g. the agent-under-test's code), added before the
+        # workdir so /work always wins if paths ever overlap.
+        for host_path, sandbox_path in spec.ro_mounts:
+            if os.path.exists(host_path):
+                args += ["--ro-bind", host_path, sandbox_path]
         args += ["--bind", handle.work_dir, SANDBOX_WORKDIR, "--chdir", SANDBOX_WORKDIR]
         if spec.network == NET_NONE:
             args += ["--unshare-net"]
