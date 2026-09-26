@@ -44,7 +44,7 @@ from agentrig.errors import BackendError, IsolationError
 TRACE_SYSCALLS = (
     "openat,open,openat2,connect,socket,execve,execveat,"
     "unlink,unlinkat,rename,renameat,renameat2,mkdir,mkdirat,"
-    "link,linkat,symlink,symlinkat"
+    "link,linkat,symlink,symlinkat,sendto,sendmsg"
 )
 
 # The in-sandbox launcher (loopback forwards + secret env), and the interpreter
@@ -265,12 +265,15 @@ class LocalBackend(SandboxBackend):
         # secrets) travels through an inherited pipe: never argv, never disk.
         pass_fds: tuple[int, ...] = ()
         cfg_fd = None
-        if spec.forwards or spec.secret_env:
+        if spec.forwards or spec.secret_env or spec.dns:
             if not os.path.exists(_LAUNCHER_PYTHON):
                 raise BackendError(caps.notes.get("launcher", "launcher unavailable"))
             cfg = {"forwards": [{"port": port, "unix": f"{NET_MOUNT}/{sock}"}
                                 for port, sock in spec.forwards],
                    "env": dict(spec.secret_env)}
+            if spec.dns:
+                cfg["dns"] = {"port": spec.dns.get("port", 53),
+                              "unix": f"{NET_MOUNT}/{spec.dns['unix']}"}
             cfg_fd, wfd = os.pipe()
             data = json.dumps(cfg).encode("utf-8")
             if len(data) > 60000:  # stay under the pipe buffer; no writer thread
@@ -345,6 +348,13 @@ class LocalBackend(SandboxBackend):
                 "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
                 "--die-with-parent", "--new-session",
                 "--ro-bind", "/usr", "/usr"]
+        # DNS-monitored scenarios need the launcher to bind loopback :53, which
+        # requires CAP_NET_BIND_SERVICE. bwrap only grants a cap to a userns
+        # "root", so map to uid 0 and add *only* that one cap (verified: uid 0
+        # alone does not grant it, so no other privilege leaks; mount-based
+        # protections -- read-only root, ro binds -- hold regardless of uid).
+        if spec.dns:
+            args += ["--uid", "0", "--gid", "0", "--cap-add", "CAP_NET_BIND_SERVICE"]
         for src, dst in _USRMERGE_SYMLINKS:
             if os.path.exists("/" + src):
                 args += ["--symlink", src, dst]
@@ -353,13 +363,23 @@ class LocalBackend(SandboxBackend):
         # rest of the host filesystem remain invisible.
         if os.path.isdir("/etc"):
             args += ["--ro-bind", "/etc", "/etc"]
+        # Point the sandbox resolver at the in-sandbox DNS sink. Bound *after*
+        # /etc so it overrides the host's resolv.conf; the host's is untouched.
+        # /etc/resolv.conf is often a symlink into /run (which does not exist in
+        # the sandbox), so bind over its real target: a /run path bwrap creates
+        # in its tmpfs, or the regular file itself. If neither is bindable,
+        # glibc falls back to 127.0.0.1 (the sink) on its own.
+        if spec.dns and spec.dns.get("resolv_conf"):
+            target = os.path.realpath("/etc/resolv.conf")
+            if not target.startswith("/etc/") or os.path.exists(target):
+                args += ["--ro-bind", spec.dns["resolv_conf"], target]
         args += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
         # Read-only mounts (e.g. the agent-under-test's code), added before the
         # workdir so /work always wins if paths ever overlap.
         for host_path, sandbox_path in spec.ro_mounts:
             if os.path.exists(host_path):
                 args += ["--ro-bind", host_path, sandbox_path]
-        if spec.forwards or spec.secret_env:
+        if spec.forwards or spec.secret_env or spec.dns:
             args += ["--ro-bind", _LAUNCHER_SRC, LAUNCHER_PATH]
         if spec.net_dir:
             args += ["--ro-bind", spec.net_dir, NET_MOUNT]

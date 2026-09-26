@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from agentrig.backends.base import SANDBOX_WORKDIR, ExecResult
+from agentrig.observe.dns_sink import DnsQuery, qtype_name
 from agentrig.observe.fakes import LoggedRequest
 from agentrig.observe.gate import GateRecord
 from agentrig.observe.manifest import ManifestDiff
@@ -52,6 +53,7 @@ class Observation:
     egress: list[dict] = field(default_factory=list)  # receipts
     llm_api: Optional[dict] = None  # None when no LLM endpoint was configured
     gate_port: Optional[int] = None
+    dns_port: Optional[int] = None  # set when a DNS sink was in use
     # (egress event, full request blob) -- in memory only, never serialized, so
     # checks see whole payloads rather than the report's truncated previews.
     raw_egress: list[tuple[dict, bytes]] = field(default_factory=list, repr=False)
@@ -88,6 +90,10 @@ class Observation:
         return [r for r in self.egress if r.get("channel") == "gate"
                 and not r.get("allowed")]
 
+    def dns_queries(self) -> list[dict]:
+        """Every DNS query the sandbox made (recorded by the sink, no trace needed)."""
+        return self._of("dns_query")
+
     def created(self) -> list[str]:
         return list(self.manifest_diff.created) if self.manifest_diff else []
 
@@ -111,6 +117,7 @@ class Observation:
             "connects": self.connects(),
             "egress_requests": self.egress_requests(),
             "egress_receipts": self.egress,
+            "dns_queries": self.dns_queries(),
             "llm_api": self.llm_api,
             "manifest_diff": self.manifest_diff.to_dict() if self.manifest_diff else None,
             "stdout": truncate_middle(self.stdout),
@@ -154,6 +161,8 @@ def assemble(
     gate_port: Optional[int] = None,
     seeded_files: Optional[dict[str, bytes]] = None,
     llm_configured: bool = False,
+    dns_records: Optional[list[DnsQuery]] = None,
+    dns_port: Optional[int] = None,
     scrubber=None,
 ) -> Observation:
     """Merge raw artifacts into a single ordered, normalized Observation.
@@ -180,6 +189,13 @@ def assemble(
     if trace_available:
         events.extend(parse_trace(exec_result.trace_path, workdir=workdir,
                                   extra_noise_write_roots=tuple(agent_mounts)))
+    # A connect to the in-sandbox DNS sink (127.0.0.1:<dns_port>) is sanctioned
+    # transport, like the gate: the *query content* is judged from the sink's
+    # own records below, not from this loopback connect.
+    if dns_port:
+        events = [e for e in events if not (
+            e.get("type") == "connect" and e.get("port") == dns_port
+            and str(e.get("addr", "")).startswith("127."))]
 
     # 2) authoritative workdir lifecycle from the manifest.
     for path in sorted(manifest_diff.created):
@@ -275,6 +291,27 @@ def assemble(
             "outcome": "blocked by the egress gate (" + rec.note + ")",
         })
 
+    # 4b) DNS queries recorded by the in-sandbox sink (name, type, transport,
+    #     labels). A query is a finding even though nothing could leave: the
+    #     sink answered locally (NXDOMAIN / sinkhole) and the netns has no route.
+    for q in dns_records or []:
+        scan = (q.name + " " + " ".join(q.labels)).encode("utf-8", "replace")
+        canary_hits = _canaries_in(scan, canaries)
+        events.append({
+            "type": "dns_query", "name": q.name, "qtype": q.qtype,
+            "qtype_name": qtype_name(q.qtype), "transport": q.transport,
+            "labels": list(q.labels), "answered": q.answered,
+            "contains_canaries": canary_hits})
+        receipts.append({
+            "channel": "dns",
+            "destination": f"dns:{q.name or '(malformed)'}/{qtype_name(q.qtype)}",
+            "method": q.transport.upper(), "bytes_out": None,
+            "payload_sha256": None, "payload_redacted": False,
+            "matched_seeded_files": [], "contains_canaries": canary_hits,
+            "allowed": False,
+            "outcome": f"DNS query recorded, answered {q.answered}; the sandbox "
+                       f"netns has no route to a real resolver"})
+
     # 5) direct connects that bypassed the bridges: nothing is routable from the
     #    sandbox's own network namespace, so none of these left the sandbox.
     bridge_ports = set(service_ports.values()) | ({gate_port} if gate_port else set())
@@ -316,5 +353,6 @@ def assemble(
         egress=receipts,
         llm_api=llm,
         gate_port=gate_port,
+        dns_port=dns_port,
         raw_egress=raw_egress,
     )

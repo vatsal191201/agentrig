@@ -109,6 +109,12 @@ class SandboxSpec:
     # Secret env vars for the agent. Delivered through an inherited pipe fd --
     # never argv, never disk -- and deliberately absent from to_dict().
     secret_env: dict[str, str] = field(default_factory=dict, repr=False)
+    # DNS monitoring: a recording sink on loopback :53. When set, the launcher
+    # binds UDP+TCP 53 (needs CAP_NET_BIND_SERVICE) and forwards to the host
+    # sink, and a scenario-specific resolv.conf points the resolver at it.
+    #   {"unix": <socket file name in net_dir>, "port": 53,
+    #    "resolv_conf": <host path bound over /etc/resolv.conf>}
+    dns: Optional[dict] = None
 
     def to_dict(self) -> dict:
         return {
@@ -120,6 +126,7 @@ class SandboxSpec:
             # Only the sandbox-side path; host paths are not reported.
             "ro_mounts": sorted(dst for _src, dst in self.ro_mounts),
             "forward_ports": sorted(port for port, _sock in self.forwards),
+            "dns_monitor": bool(self.dns),
         }
 
 

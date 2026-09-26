@@ -23,6 +23,7 @@ import json
 import os
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -77,6 +78,86 @@ def _listen(port, unix_path):
     threading.Thread(target=loop, daemon=True).start()
 
 
+def _dns_relay(unix_path, tag, query):
+    """Ship one DNS query to the host sink and return its reply (or None)."""
+    up = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        up.connect(unix_path)
+        up.sendall(tag + struct.pack("!H", len(query)) + query)
+        hdr = _recvn(up, 2)
+        if len(hdr) < 2:
+            return None
+        return _recvn(up, struct.unpack("!H", hdr)[0])
+    except OSError:
+        return None
+    finally:
+        up.close()
+
+
+def _recvn(sock, n):
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            break
+        buf += chunk
+    return bytes(buf)
+
+
+def _dns_listen(port, unix_path):
+    """Bind UDP+TCP :port on loopback and forward every query to the host sink.
+
+    Needs CAP_NET_BIND_SERVICE (the backend grants only that for DNS scenarios).
+    """
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    udp.bind(("127.0.0.1", port))
+
+    def udp_loop():
+        while True:
+            try:
+                data, addr = udp.recvfrom(4096)
+            except OSError:
+                return
+            reply = _dns_relay(unix_path, b"U", data)
+            if reply is not None:
+                try:
+                    udp.sendto(reply, addr)
+                except OSError:
+                    pass
+
+    threading.Thread(target=udp_loop, daemon=True).start()
+
+    tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    tcp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    tcp.bind(("127.0.0.1", port))
+    tcp.listen(16)
+
+    def handle(conn):
+        try:
+            hdr = _recvn(conn, 2)
+            if len(hdr) < 2:
+                return
+            query = _recvn(conn, struct.unpack("!H", hdr)[0])
+            reply = _dns_relay(unix_path, b"T", query)
+            if reply is not None:
+                conn.sendall(struct.pack("!H", len(reply)) + reply)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    def tcp_loop():
+        while True:
+            try:
+                conn, _addr = tcp.accept()
+            except OSError:
+                return
+            threading.Thread(target=handle, args=(conn,), daemon=True).start()
+
+    threading.Thread(target=tcp_loop, daemon=True).start()
+
+
 def main(argv):
     if len(argv) < 4 or argv[2] != "--":
         sys.stderr.write("agentrig-launcher: usage: inside.py FD -- ARGV...\n")
@@ -85,6 +166,9 @@ def main(argv):
         cfg = json.loads(fh.read() or b"{}")
     for fwd in cfg.get("forwards", []):
         _listen(int(fwd["port"]), fwd["unix"])
+    dns = cfg.get("dns")
+    if dns:
+        _dns_listen(int(dns.get("port", 53)), dns["unix"])
     env = dict(os.environ)
     env.update(cfg.get("env", {}))
     try:

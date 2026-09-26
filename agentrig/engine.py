@@ -31,6 +31,7 @@ from urllib.parse import urlsplit
 from agentrig.backends.base import NET_LOOPBACK, Limits, SandboxBackend, SandboxSpec
 from agentrig.errors import BackendError, IsolationError, ScenarioError
 from agentrig.observe import Observation, assemble
+from agentrig.observe.dns_sink import DnsSink
 from agentrig.observe.fakes import FakeServiceSet
 from agentrig.observe.gate import EgressGate
 from agentrig.observe.manifest import Manifest, diff_manifests
@@ -50,6 +51,10 @@ from agentrig.verdict import (
 # never collide with the host, and scenario URLs are identical run to run.
 GATE_PORT = 17000
 SERVICE_PORT_BASE = 17001
+# The in-sandbox DNS sink lives on the standard resolver port so real resolver
+# libraries (getaddrinfo, dig, ...) reach it unchanged.
+DNS_PORT = 53
+DNS_SOCK = "dns.sock"
 # An agent may exit with this code (sysexits EX_UNAVAILABLE) to declare it did
 # not complete its task for reasons outside its policy (model unreachable, step
 # budget exhausted). Such a trial can never count as a pass.
@@ -316,6 +321,7 @@ class Engine:
                 f"{config.task_field!r} to hand the agent")
         services = FakeServiceSet()
         gate = EgressGate(allow={config.llm.endpoint} if config.llm else set())
+        dns_sink = DnsSink() if scenario.dns_monitor else None
         net_dir = tempfile.mkdtemp(prefix="agentrig-net-")
         try:
             if scenario.network == NET_LOOPBACK:
@@ -330,6 +336,14 @@ class Engine:
             forwards = [(GATE_PORT, "gate.sock")] + [
                 (svc.port, os.path.basename(svc.unix_path))
                 for svc in services.services.values()]
+
+            dns_spec = None
+            if dns_sink is not None:
+                dns_sink.start(os.path.join(net_dir, DNS_SOCK))
+                resolv = os.path.join(net_dir, "resolv.conf")
+                with open(resolv, "w", encoding="utf-8") as fh:
+                    fh.write("nameserver 127.0.0.1\noptions edns0 timeout:1 attempts:1\n")
+                dns_spec = {"unix": DNS_SOCK, "port": DNS_PORT, "resolv_conf": resolv}
 
             text = substitute_deep(assignment, subst)
             env = dict(substitute_deep(phase.setup_env, subst))
@@ -349,7 +363,7 @@ class Engine:
             spec = SandboxSpec(network=scenario.network, env=env,
                                limits=config.limits, ro_mounts=ro_mounts,
                                trace_syscalls=config.trace, forwards=forwards,
-                               net_dir=net_dir, secret_env=secret_env)
+                               net_dir=net_dir, secret_env=secret_env, dns=dns_spec)
             handle = self.backend.create(spec)
             handles.append(handle)
             seeded: dict[str, bytes] = {}
@@ -368,6 +382,8 @@ class Engine:
             after = Manifest.snapshot(handle.work_dir)
             services.stop_all()
             gate.stop()
+            if dns_sink is not None:
+                dns_sink.stop()
             obs = assemble(
                 result, diff_manifests(before, after),
                 {n: s.requests for n, s in services.services.items()},
@@ -376,11 +392,15 @@ class Engine:
                 service_ports={n: s.port for n, s in services.services.items()},
                 gate_records=gate.records, gate_port=GATE_PORT,
                 seeded_files=seeded, llm_configured=config.llm is not None,
+                dns_records=dns_sink.queries if dns_sink is not None else None,
+                dns_port=DNS_PORT if dns_sink is not None else None,
                 scrubber=scrubber)
             return PhaseRun(phase.id, obs, spec.to_dict())
         finally:
             services.stop_all()
             gate.stop()
+            if dns_sink is not None:
+                dns_sink.stop()
             shutil.rmtree(net_dir, ignore_errors=True)
 
     # -- whole runs ----------------------------------------------------------

@@ -57,6 +57,14 @@ _CONNECT_RE = re.compile(
     r"connect\((?P<fd>[^,]+),\s*\{(?P<addr>.*?)\},\s*\d+\)\s*=\s*"
     r"(?P<ret>-?\d+)(?:\s+(?P<errno>E[A-Z0-9]+))?"
 )
+# A datagram send that carries its own destination (an *unconnected* socket):
+# `sendto(fd, ..., {sa_family=AF_INET, ...}, addrlen) = ret`. This is the raw
+# UDP escape (e.g. a hand-rolled query straight to a public resolver) that a
+# plain connect() trace would miss. Sends on a *connected* socket pass NULL for
+# the address and are ignored here (the connect() was already recorded).
+_SEND_CALL_RE = re.compile(r"^\s*(?:sendto|sendmsg|sendmmsg)\(")
+_SEND_RET_RE = re.compile(
+    r"=\s*(?P<ret>-?\d+)(?:\s+(?P<errno>E[A-Z0-9]+))?(?:\s+\([^)]*\))?\s*$")
 _EXECVE_RE = re.compile(
     r'execve(?:at)?\((?:[^,]+,\s*)?"(?P<path>(?:[^"\\]|\\.)*)",\s*'
     r"\[(?P<argv>.*?)\](?:,\s*.*?)?\)\s*=\s*(?P<ret>-?\d+)"
@@ -198,6 +206,8 @@ def _parse_body(body: str, workdir: str,
     m = _CONNECT_RE.search(body)
     if m:
         return _connect_event(m)
+    if _SEND_CALL_RE.match(body) and "sa_family=AF_INET" in body:
+        return _dgram_send_event(body)
     m = _EXECVE_RE.search(body)
     if m:
         if m.group("ret") != "0":
@@ -285,29 +295,60 @@ def _open_event(m: re.Match, workdir: str,
             "errno": errno or "EACCES"}
 
 
+_DENIED_ERRNOS = ("ECONNREFUSED", "ENETUNREACH", "EHOSTUNREACH", "EACCES",
+                  "EPERM", "ETIMEDOUT", "ENETDOWN", "EAFNOSUPPORT")
+
+
+def _conn_result(ret: int, errno: Optional[str]) -> str:
+    if ret >= 0 or errno == "EINPROGRESS":
+        return "ok"
+    if errno in _DENIED_ERRNOS:
+        return "denied"
+    return "error"
+
+
+def _addr_of(blob: str) -> tuple[Optional[str], str, Optional[str]]:
+    family = _re1(r"sa_family=(\w+)", blob)
+    if family == "AF_INET":
+        ip = _re1(r'sin_addr=inet_addr\("([^"]+)"\)', blob) or ""
+        port = _re1(r"sin_port=htons\((\d+)\)", blob)
+    elif family == "AF_INET6":
+        ip = _re1(r'inet_pton\(AF_INET6,\s*"([^"]+)"', blob) or ""
+        port = _re1(r"sin6_port=htons\((\d+)\)", blob)
+    else:
+        return family, "", None
+    return family, ip, port
+
+
 def _connect_event(m: re.Match) -> Optional[dict]:
-    addr_blob = m.group("addr")
-    ret = int(m.group("ret"))
-    errno = m.groupdict().get("errno")
-    family = _re1(r"sa_family=(\w+)", addr_blob)
+    family, ip, port = _addr_of(m.group("addr"))
     if family not in ("AF_INET", "AF_INET6"):
         return None  # AF_UNIX / AF_NETLINK: local plumbing, not egress
-    if family == "AF_INET":
-        ip = _re1(r'sin_addr=inet_addr\("([^"]+)"\)', addr_blob) or ""
-        port = _re1(r"sin_port=htons\((\d+)\)", addr_blob)
-    else:
-        ip = _re1(r'inet_pton\(AF_INET6,\s*"([^"]+)"', addr_blob) or ""
-        port = _re1(r"sin6_port=htons\((\d+)\)", addr_blob)
-    if ret == 0 or errno == "EINPROGRESS":
-        result = "ok"
-    elif errno in ("ECONNREFUSED", "ENETUNREACH", "EHOSTUNREACH", "EACCES",
-                   "EPERM", "ETIMEDOUT", "ENETDOWN"):
-        result = "denied"
-    else:
-        result = "error"
     return {"type": "connect", "family": family, "addr": ip,
-            "port": int(port) if port else None, "result": result,
-            "errno": errno}
+            "port": int(port) if port else None,
+            "result": _conn_result(int(m.group("ret")), m.groupdict().get("errno")),
+            "errno": m.groupdict().get("errno")}
+
+
+def _dgram_send_event(body: str) -> Optional[dict]:
+    """A datagram sent with an explicit destination (unconnected socket).
+
+    Only non-loopback destinations matter here: this exists to catch a raw send
+    straight to a public IP (the escape a plain connect() trace would miss).
+    Loopback datagrams are sink/gate/service transport -- their *content* is
+    recorded on the host side -- and can never leave the netns anyway.
+    """
+    family, ip, port = _addr_of(body)
+    if family not in ("AF_INET", "AF_INET6"):
+        return None
+    if ip.startswith("127.") or ip in ("::1", "0.0.0.0", "::"):
+        return None
+    rm = _SEND_RET_RE.search(body)
+    ret = int(rm.group("ret")) if rm else 0
+    errno = rm.group("errno") if rm else None
+    return {"type": "connect", "family": family, "addr": ip,
+            "port": int(port) if port else None,
+            "result": _conn_result(ret, errno), "errno": errno, "via": "sendto"}
 
 
 def _re1(pattern: str, text: str) -> Optional[str]:

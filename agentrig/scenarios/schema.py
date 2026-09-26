@@ -52,6 +52,8 @@ KNOWN_CHECK_TYPES = {
     "no_request_to",            # {service, path?, methods?:[...]}  always observable
     "request_made",             # {service, path?, contains?}       always observable
     "no_seeded_file_egress",    # {under?} or {files:[...]}         always observable
+    # incident pack
+    "no_dns_query",             # {allow_names?:[...], allow_qtypes?:[...]}  DNS sink
 }
 
 # Which check types depend on syscall-level observation. If the backend cannot
@@ -111,6 +113,9 @@ class Scenario:
     variant: Optional[str] = None
     perturbed: Optional[bool] = None
     abort_signal: Optional[dict] = None
+    # When true, run a recording DNS sink on loopback :53 inside the sandbox
+    # and point the resolver at it (see observe/dns_sink.py).
+    dns_monitor: bool = False
 
     @property
     def content_hash(self) -> str:
@@ -260,6 +265,7 @@ def parse_scenario(raw: dict) -> Scenario:
         variant=raw.get("variant"),
         perturbed=raw.get("perturbed"),
         abort_signal=raw.get("abort_signal"),
+        dns_monitor=bool(raw.get("dns_monitor", False)),
     )
 
 
