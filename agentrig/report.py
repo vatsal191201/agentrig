@@ -282,7 +282,7 @@ def build_report(outcomes: list[ScenarioOutcome], agent_info: dict,
         report["signature"] = {
             "signed": False,
             "reason": "cryptography not installed; report is unsigned "
-                      "(hash chain still provides tamper-evidence)",
+                      "(the chain is a recomputable digest, not tamper-evidence)",
         }
     return report
 
