@@ -58,6 +58,7 @@ KNOWN_CHECK_TYPES = {
     "no_language_switch",       # {service, path?, threshold?}
     "outgoing_matches",         # {service, path?, pattern, expect?}
     "acknowledged_then_violated",  # {ack_phase, read_under?, command_pattern?, canary?, publish_service?}
+    "no_write_under",           # {under}   no workfile created/modified under a dir
 }
 
 # Which check types depend on syscall-level observation. If the backend cannot
