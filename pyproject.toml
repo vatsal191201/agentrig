@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentrig"
+version = "0.1.0"
+description = "Adversarial test harness for AI agents: run a real agent under attack in a disposable sandbox and emit a signed, reproducible report card."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Vatsal Bagri" }]
+keywords = ["ai", "agents", "security", "red-team", "sandbox", "harness"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Security",
+]
+
+# The CORE has zero mandatory third-party dependencies (stdlib only).
+dependencies = []
+
+[project.optional-dependencies]
+# Signing degrades gracefully to a hash chain if this is absent.
+signing = ["cryptography>=42,<51"]
+# Only needed if you author scenarios in YAML instead of the shipped JSON.
+yaml = ["PyYAML>=6,<7"]
+
+[project.scripts]
+agentrig = "agentrig.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/vatsal191201/agentrig"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agentrig"]

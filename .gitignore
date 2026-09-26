@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# agentrig runtime artifacts (may contain host paths / decoy secrets)
+*.run.json
+run-*.json
+report-*.json
+report-*.md
+/runs/
+/.agentrig/
+agentrig-state/
+
+# signing keys must never be committed
+*.key
+*.pem
+signing_key*
+ed25519*
+
+# local design brief (contains host-specific absolute paths; not a deliverable)
+BRIEF.md
+
+# editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
