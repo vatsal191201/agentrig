@@ -79,10 +79,14 @@ def _select_scenarios(spec: str, extra_dir: Optional[str]) -> list:
         return [allsc[i] for i in sorted(allsc)]
     chosen = []
     for sid in [s.strip() for s in spec.split(",") if s.strip()]:
-        if sid not in allsc:
+        family = [allsc[i] for i in sorted(allsc) if allsc[i].family == sid]
+        if sid in allsc:
+            chosen.append(allsc[sid])
+        elif family:  # a family name selects all of its variants
+            chosen.extend(family)
+        else:
             raise AgentrigError(
                 f"unknown scenario {sid!r}; available: {', '.join(sorted(allsc))}")
-        chosen.append(allsc[sid])
     return chosen
 
 

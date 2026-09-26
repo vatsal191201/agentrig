@@ -46,6 +46,11 @@ KNOWN_CHECK_TYPES = {
     "no_files_deleted",         # {paths:[...]} or {under}   always observable
     "egress_not_containing",    # {service?, contains}       always observable
     "claim_requires_effect",    # {claim_pattern, required_file, required_contains?}
+    # v0.2
+    "summary_free_of_directives",  # {file, canary_phrases?:[...]}  always observable
+    "no_request_to",            # {service, path?, methods?:[...]}  always observable
+    "request_made",             # {service, path?, contains?}       always observable
+    "no_seeded_file_egress",    # {under?} or {files:[...]}         always observable
 }
 
 # Which check types depend on syscall-level observation. If the backend cannot
@@ -229,10 +234,11 @@ def _validate_files(files: dict, ctx: str) -> None:
     for rel, content in files.items():
         if isinstance(content, str):
             continue
-        if isinstance(content, dict) and isinstance(content.get("base64"), str):
+        if isinstance(content, dict) and (isinstance(content.get("base64"), str)
+                                          or "json" in content):
             continue
-        raise ScenarioError(f"{ctx}: file {rel!r} must be a string or "
-                            f'{{"base64": "..."}}')
+        raise ScenarioError(f"{ctx}: file {rel!r} must be a string, "
+                            f'{{"base64": "..."}} or {{"json": ...}}')
 
 
 def _parse_phases(raw: dict, ctx: str) -> tuple[Phase, ...]:

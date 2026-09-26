@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 
 from agentrig.errors import ScenarioError
+from agentrig.scenarios.family import expand_family
 from agentrig.scenarios.schema import (
     CHECKS_NEEDING_TRACE,
     KNOWN_CHECK_TYPES,
@@ -38,10 +39,13 @@ def _load_dir(directory: Path) -> dict[str, Scenario]:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ScenarioError(f"cannot read scenario {path.name}: {exc}") from exc
-        scenario = parse_scenario(raw)
-        if scenario.id in scenarios:
-            raise ScenarioError(f"duplicate scenario id {scenario.id!r} in {path}")
-        scenarios[scenario.id] = scenario
+        raws = expand_family(raw) if isinstance(raw, dict) and "variants" in raw \
+            else [raw]
+        for one in raws:
+            scenario = parse_scenario(one)
+            if scenario.id in scenarios:
+                raise ScenarioError(f"duplicate scenario id {scenario.id!r} in {path}")
+            scenarios[scenario.id] = scenario
     return scenarios
 
 
