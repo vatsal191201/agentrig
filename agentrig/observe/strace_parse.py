@@ -1,0 +1,224 @@
+"""Turn a raw strace log into normalized, backend-agnostic side-effect events.
+
+strace is verbose and low level; this module distills it down to the handful of
+events a security verdict actually needs:
+
+    file_read                 a file under the workdir was opened for reading
+    file_write                a write landed *outside* the workdir (scope leak)
+    file_write_attempt_denied a write outside the workdir was blocked by the
+                              sandbox -- the attempt is the signal, and the
+                              host stayed untouched
+    file_delete / file_rename destructive fs ops on the workdir
+    process_spawn             an execve (argv captured, for rm -rf detection)
+    connect                   a network connect (addr/port decoded, allowed or
+                              denied) -- a denied egress is itself evidence
+
+Reads and writes *inside* the workdir are deliberately dropped here: the file
+manifest records those with content hashes, which is authoritative. System
+noise (loader, libraries, /proc, /tmp scratch) is filtered so the event stream
+stays about the scenario, not about Python's import machinery.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from typing import Optional
+
+# Only *scratch/runtime* write targets are noise. A write attempt to /etc,
+# /usr, /home, /root, ... is a scope escape or persistence attempt and MUST be
+# recorded even though the read-only sandbox denies it. (Reads are filtered
+# separately: we keep reads only under the workdir, see _open_event.)
+_NOISE_WRITE_ROOTS = ("/tmp", "/proc", "/dev", "/sys", "/run")
+
+# Wrapper programs the harness itself execs; never attributed to the agent.
+_HARNESS_EXECS = frozenset({"bwrap", "strace", "systemd-run"})
+
+_PID_RE = re.compile(r"^(?:\[pid\s+(\d+)\]|\s*(\d+))\s+")
+
+_OPENAT_RE = re.compile(
+    r'openat(?:2)?\((?P<dirfd>[^,]+),\s*"(?P<path>(?:[^"\\]|\\.)*)",\s*'
+    r"(?P<flags>[^,)]+)(?:,[^)]*)?\)\s*=\s*(?P<ret>-?\d+)"
+    r"(?:<(?P<resolved>[^>]*)>)?(?:\s+(?P<errno>E[A-Z0-9]+))?"
+)
+_OPEN_RE = re.compile(
+    r'(?<!at)open\("(?P<path>(?:[^"\\]|\\.)*)",\s*(?P<flags>[^,)]+)(?:,[^)]*)?\)'
+    r"\s*=\s*(?P<ret>-?\d+)(?:<(?P<resolved>[^>]*)>)?(?:\s+(?P<errno>E[A-Z0-9]+))?"
+)
+_CONNECT_RE = re.compile(
+    r"connect\((?P<fd>[^,]+),\s*\{(?P<addr>.*?)\},\s*\d+\)\s*=\s*"
+    r"(?P<ret>-?\d+)(?:\s+(?P<errno>E[A-Z0-9]+))?"
+)
+_EXECVE_RE = re.compile(
+    r'execve(?:at)?\((?:[^,]+,\s*)?"(?P<path>(?:[^"\\]|\\.)*)",\s*'
+    r"\[(?P<argv>.*?)\](?:,\s*.*?)?\)\s*=\s*(?P<ret>-?\d+)"
+)
+_UNLINK_RE = re.compile(
+    r'unlink(?:at)?\((?:(?P<dirfd>[^,]+),\s*)?"(?P<path>(?:[^"\\]|\\.)*)"'
+    r"(?:,[^)]*)?\)\s*=\s*(?P<ret>-?\d+)"
+)
+_RENAME_RE = re.compile(
+    r'rename(?:at2?)?\((?:[^,]+,\s*)?"(?P<src>(?:[^"\\]|\\.)*)",\s*'
+    r'(?:[^,]+,\s*)?"(?P<dst>(?:[^"\\]|\\.)*)"(?:,[^)]*)?\)\s*=\s*(?P<ret>-?\d+)'
+)
+_ARGV_ITEM_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
+_DIRFD_PATH_RE = re.compile(r"<(?P<p>[^>]*)>")
+
+
+def _unescape(s: str) -> str:
+    return s.encode("latin-1", "backslashreplace").decode("unicode_escape", "replace")
+
+
+def _under(path: str, roots: tuple[str, ...]) -> bool:
+    return any(path == r or path.startswith(r + "/") for r in roots)
+
+
+def _resolve(path: str, dirfd: str, workdir: str) -> str:
+    if path.startswith("/"):
+        return os.path.normpath(path)
+    base = workdir
+    m = _DIRFD_PATH_RE.search(dirfd or "")
+    if m:
+        base = m.group("p")
+    return os.path.normpath(os.path.join(base, path))
+
+
+def _strip_pid(line: str) -> str:
+    return _PID_RE.sub("", line, count=1)
+
+
+def _pid_of(line: str) -> Optional[str]:
+    m = _PID_RE.match(line)
+    if not m:
+        return None
+    return m.group(1) or m.group(2)
+
+
+def _stitch(lines: list[str]) -> list[str]:
+    """Rejoin strace's <unfinished ...> / <... resumed> line pairs per-pid."""
+    pending: dict[str, str] = {}
+    out: list[str] = []
+    for raw in lines:
+        line = raw.rstrip("\n")
+        pid = _pid_of(line) or "_"
+        body = _strip_pid(line)
+        if body.endswith("<unfinished ...>"):
+            pending[pid] = body[: -len("<unfinished ...>")].rstrip()
+            continue
+        resumed = re.match(r"<\.\.\.\s+\w+\s+resumed>(?P<rest>.*)", body)
+        if resumed and pid in pending:
+            out.append(pending.pop(pid) + resumed.group("rest"))
+            continue
+        out.append(body)
+    return out
+
+
+def parse_trace(trace_path: str, *, workdir: str = "/work") -> list[dict]:
+    """Parse a strace log file into a list of normalized event dicts."""
+    try:
+        with open(trace_path, errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return []
+    return parse_lines(lines, workdir=workdir)
+
+
+def parse_lines(lines: list[str], *, workdir: str = "/work") -> list[dict]:
+    events: list[dict] = []
+    for body in _stitch(lines):
+        ev = _parse_body(body, workdir)
+        if ev is not None:
+            events.append(ev)
+    return events
+
+
+def _parse_body(body: str, workdir: str) -> Optional[dict]:
+    m = _OPENAT_RE.search(body) or _OPEN_RE.search(body)
+    if m:
+        return _open_event(m, workdir)
+    m = _CONNECT_RE.search(body)
+    if m:
+        return _connect_event(m)
+    m = _EXECVE_RE.search(body)
+    if m:
+        if m.group("ret") != "0":
+            return None
+        path = _unescape(m.group("path"))
+        argv = [_unescape(x) for x in _ARGV_ITEM_RE.findall(m.group("argv"))]
+        # Drop the harness's own wrapper execs. Besides being noise, the bwrap
+        # argv embeds the host-side bind-mount path -- it must never reach the
+        # report. What the *agent* runs (python, sh, rm, ...) is kept.
+        argv0 = argv[0] if argv else ""
+        if os.path.basename(path) in _HARNESS_EXECS or \
+                os.path.basename(argv0) in _HARNESS_EXECS:
+            return None
+        return {"type": "process_spawn", "path": path, "argv": argv}
+    m = _UNLINK_RE.search(body)
+    if m and m.group("ret") == "0":
+        path = _resolve(_unescape(m.group("path")), m.groupdict().get("dirfd") or "",
+                        workdir)
+        if _under(path, (workdir,)):
+            return {"type": "file_delete", "path": path}
+        return None
+    m = _RENAME_RE.search(body)
+    if m and m.group("ret") == "0":
+        src = _resolve(_unescape(m.group("src")), "", workdir)
+        dst = _resolve(_unescape(m.group("dst")), "", workdir)
+        if _under(src, (workdir,)) or _under(dst, (workdir,)):
+            return {"type": "file_rename", "src": src, "dst": dst}
+    return None
+
+
+def _open_event(m: re.Match, workdir: str) -> Optional[dict]:
+    flags = m.group("flags")
+    ret = int(m.group("ret"))
+    errno = m.groupdict().get("errno")
+    resolved = m.groupdict().get("resolved")
+    path_arg = _unescape(m.group("path"))
+    dirfd = m.groupdict().get("dirfd") or ""
+    path = resolved if resolved else _resolve(path_arg, dirfd, workdir)
+    write_intent = any(f in flags for f in ("O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC"))
+
+    if not write_intent:
+        # a read
+        if ret >= 0 and _under(path, (workdir,)):
+            return {"type": "file_read", "path": path}
+        return None
+
+    # a write-intent open. Inside workdir -> manifest owns it. Scratch -> drop.
+    if _under(path, (workdir,)) or _under(path, _NOISE_WRITE_ROOTS):
+        return None
+    if ret >= 0:
+        return {"type": "file_write", "path": path}
+    return {"type": "file_write_attempt_denied", "path": path,
+            "errno": errno or "EACCES"}
+
+
+def _connect_event(m: re.Match) -> Optional[dict]:
+    addr_blob = m.group("addr")
+    ret = int(m.group("ret"))
+    errno = m.groupdict().get("errno")
+    family = _re1(r"sa_family=(\w+)", addr_blob)
+    if family not in ("AF_INET", "AF_INET6"):
+        return None  # AF_UNIX / AF_NETLINK: local plumbing, not egress
+    if family == "AF_INET":
+        ip = _re1(r'sin_addr=inet_addr\("([^"]+)"\)', addr_blob) or ""
+        port = _re1(r"sin_port=htons\((\d+)\)", addr_blob)
+    else:
+        ip = _re1(r'inet_pton\(AF_INET6,\s*"([^"]+)"', addr_blob) or ""
+        port = _re1(r"sin6_port=htons\((\d+)\)", addr_blob)
+    if ret == 0 or errno == "EINPROGRESS":
+        result = "ok"
+    elif errno in ("ECONNREFUSED", "ENETUNREACH", "EHOSTUNREACH", "EACCES",
+                   "EPERM", "ETIMEDOUT", "ENETDOWN"):
+        result = "denied"
+    else:
+        result = "error"
+    return {"type": "connect", "family": family, "addr": ip,
+            "port": int(port) if port else None, "result": result,
+            "errno": errno}
+
+
+def _re1(pattern: str, text: str) -> Optional[str]:
+    m = re.search(pattern, text)
+    return m.group(1) if m else None
