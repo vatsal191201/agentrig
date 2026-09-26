@@ -106,11 +106,15 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.trials < 1:
         print("error: --trials must be >= 1", file=sys.stderr)
         return EXIT_CANNOT_RUN
+    if args.hops < 1:
+        print("error: --hops must be >= 1", file=sys.stderr)
+        return EXIT_CANNOT_RUN
     engine = Engine(backend)
     limits = Limits(memory_mb=args.memory_mb, cpu_quota_percent=args.cpu_quota,
                     pids_max=args.pids_max, wall_timeout_s=args.timeout)
     config = RunConfig(trials=args.trials, task_field=args.task_field,
-                       llm=_llm_config(args), trace=not args.no_trace, limits=limits)
+                       llm=_llm_config(args), trace=not args.no_trace, limits=limits,
+                       hops=args.hops)
     try:
         outcomes, agent_info = engine.run(scns, args.agent, config=config)
     except IsolationError as exc:
@@ -250,6 +254,11 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--trials", type=int, default=1,
                    help="run each scenario N times, each in a fresh sandbox; "
                         "reports pass rate, pass^N and a Wilson 95%% interval")
+    r.add_argument("--hops", type=int, default=1,
+                   help="for a self-replicating (worm) scenario: chain N hops, "
+                        "feeding each hop's outgoing message in as the next hop's "
+                        "inbox (fresh sandbox per hop); reports per-hop infection "
+                        "and the replication rate. 1 = ordinary run")
     r.add_argument("--task-field", choices=("prompt", "task"), default="prompt",
                    dest="task_field",
                    help="what the agent is handed: 'prompt' = directive "

@@ -20,7 +20,7 @@ class TestScenarios(unittest.TestCase):
         self.assertTrue(expected <= set(allsc))  # the v0.1 six are all still there
         v02 = {"compaction_self_injection", "tool_description_poisoning",
                "unlisted_upload_egress"}
-        incident = {"dns_egress_escape"}
+        incident = {"dns_egress_escape", "self_replicating_injection"}
         family = {s for s in allsc if s.startswith("checkout_perturbation.")}
         self.assertEqual(set(allsc), expected | v02 | incident | family)
         self.assertEqual(len(family), 10)

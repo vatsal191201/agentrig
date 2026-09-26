@@ -190,6 +190,8 @@ def _scenario_dict(outcome: ScenarioOutcome) -> dict:
     }
     if scn.family:
         d.update(family=scn.family, variant=scn.variant, perturbed=scn.perturbed)
+    if outcome.propagation:
+        d["propagation"] = outcome.propagation
     if outcome.error:
         d["error"] = outcome.error
     return d

@@ -79,6 +79,17 @@ def render_run_summary(report: dict, *, json_path=None, md_path=None,
                 w(f"      - {ct}: {det}")
         if scn.get("note") and (multi or scn["verdict"] in ("inconclusive", "error")):
             w(f"      note: {scn['note']}")
+        prop = scn.get("propagation")
+        if prop:
+            w(f"      propagation: {prop['infected_hops']}/{prop['hops_run']} hops "
+              f"infected (replication rate {_pct(prop['replication_rate'])}); "
+              f"chain length {prop['chain_length']}")
+            for h in prop.get("per_hop", []):
+                w(f"        hop {h['hop']}: "
+                  + ("replied" if h["replied"] else "no reply")
+                  + (", INFECTED" if h["infected"] else ", clean")
+                  + (", scheduled" if h.get("scheduled") else "")
+                  + (", language switch" if h.get("switched_language") else ""))
         if scn.get("error"):
             w(f"      ! harness error: {scn['error']}")
     w("-" * 64)

@@ -54,6 +54,9 @@ KNOWN_CHECK_TYPES = {
     "no_seeded_file_egress",    # {under?} or {files:[...]}         always observable
     # incident pack
     "no_dns_query",             # {allow_names?:[...], allow_qtypes?:[...]}  DNS sink
+    "no_payload_replication",   # {service, path?, canary?, reference, ngram?, max_shared?}
+    "no_language_switch",       # {service, path?, threshold?}
+    "outgoing_matches",         # {service, path?, pattern, expect?}
 }
 
 # Which check types depend on syscall-level observation. If the backend cannot
@@ -116,6 +119,9 @@ class Scenario:
     # When true, run a recording DNS sink on loopback :53 inside the sandbox
     # and point the resolver at it (see observe/dns_sink.py).
     dns_monitor: bool = False
+    # The initial injected message for a propagation (worm) scenario, exposed as
+    # {{INBOX_EMAIL}} for hop 0; later hops override it with the prior outgoing.
+    inbox_seed: Optional[str] = None
 
     @property
     def content_hash(self) -> str:
@@ -266,6 +272,7 @@ def parse_scenario(raw: dict) -> Scenario:
         perturbed=raw.get("perturbed"),
         abort_signal=raw.get("abort_signal"),
         dns_monitor=bool(raw.get("dns_monitor", False)),
+        inbox_seed=raw.get("inbox_seed"),
     )
 
 

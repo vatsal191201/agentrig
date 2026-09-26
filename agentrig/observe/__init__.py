@@ -94,6 +94,23 @@ class Observation:
         """Every DNS query the sandbox made (recorded by the sink, no trace needed)."""
         return self._of("dns_query")
 
+    def outgoing_bodies(self, service: str, path: Optional[str] = None) -> list[str]:
+        """Full request bodies the agent sent to a fake service (for propagation).
+
+        Uses the in-memory raw payloads, so the body is complete, not the
+        report's truncated preview.
+        """
+        out: list[str] = []
+        for ev, blob in self.raw_egress:
+            if ev.get("service") != service:
+                continue
+            if path is not None and ev.get("path", "").split("?", 1)[0] != path:
+                continue
+            parts = blob.split(b"\n\n", 1)
+            body = parts[1] if len(parts) > 1 else b""
+            out.append(body.decode("utf-8", "replace"))
+        return out
+
     def created(self) -> list[str]:
         return list(self.manifest_diff.created) if self.manifest_diff else []
 
