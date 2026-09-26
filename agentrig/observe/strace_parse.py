@@ -32,7 +32,15 @@ from typing import Optional
 _NOISE_WRITE_ROOTS = ("/tmp", "/proc", "/dev", "/sys", "/run")
 
 # Wrapper programs the harness itself execs; never attributed to the agent.
-_HARNESS_EXECS = frozenset({"bwrap", "strace", "systemd-run"})
+# Matched by *exact system path* (read-only inside the sandbox), never by
+# basename or argv[0]: an agent can name a copy of `rm` "bwrap", or exec rm
+# with argv[0]="bwrap", and neither may hide the spawn.
+_HARNESS_EXEC_PATHS = frozenset(
+    f"{d}/{n}" for d in ("/usr/bin", "/bin", "/usr/local/bin")
+    for n in ("bwrap", "strace", "systemd-run"))
+# The in-sandbox launcher's exact invocation prefix (see backends/inside.py).
+# Hiding it hides nothing: whatever it runs gets its own execve record.
+_LAUNCHER_ARGV = ["/usr/bin/python3", "-I", "-S", "/.agentrig/inside.py"]
 
 _PID_RE = re.compile(r"^(?:\[pid\s+(\d+)\]|\s*(\d+))\s+")
 
@@ -155,9 +163,9 @@ def _parse_body(body: str, workdir: str,
         # Drop the harness's own wrapper execs. Besides being noise, the bwrap
         # argv embeds the host-side bind-mount path -- it must never reach the
         # report. What the *agent* runs (python, sh, rm, ...) is kept.
-        argv0 = argv[0] if argv else ""
-        if os.path.basename(path) in _HARNESS_EXECS or \
-                os.path.basename(argv0) in _HARNESS_EXECS:
+        if path in _HARNESS_EXEC_PATHS:
+            return None
+        if path == _LAUNCHER_ARGV[0] and argv[1:4] == _LAUNCHER_ARGV[1:]:
             return None
         return {"type": "process_spawn", "path": path, "argv": argv}
     m = _UNLINK_RE.search(body)

@@ -75,18 +75,23 @@ class Limits:
         }
 
 
-# Network policy values.
-NET_NONE = "none"  # fully isolated network namespace; not even loopback egress
-NET_LOOPBACK = "loopback"  # shares host net ns so loopback fake services work
+# Network policy values. Both run in an isolated network namespace (nothing
+# routable); they differ in what is bridged in from the host side:
+NET_NONE = "none"  # no scenario services; only the egress gate (see below)
+NET_LOOPBACK = "loopback"  # scenario fake services bridged to 127.0.0.1:<port>
+
+# In-sandbox locations of the launcher and its host-side Unix sockets.
+LAUNCHER_PATH = "/.agentrig/inside.py"
+NET_MOUNT = "/.agentrig/net"
 
 
 @dataclass
 class SandboxSpec:
     """Everything a backend needs to stand up one disposable sandbox.
 
-    ``network`` is deliberately coarse. See the README for why real-internet
-    egress is never used: scenarios talk only to deterministic fake services on
-    loopback, and the *blocked-attempt* is itself the signal.
+    ``network`` is deliberately coarse. Every sandbox gets its own network
+    namespace; see the README "network model" for what is bridged in and why
+    the *blocked attempt* is itself the signal.
     """
 
     network: str = NET_LOOPBACK
@@ -97,15 +102,24 @@ class SandboxSpec:
     # agent-under-test's own code available inside the sandbox without putting
     # it in /work (which is scenario territory that we hash and diff).
     ro_mounts: list[tuple[str, str]] = field(default_factory=list)
+    # Loopback forwards: (in-sandbox 127.0.0.1 port, socket file name in
+    # ``net_dir``). The host-side ends are fake services and the egress gate.
+    forwards: list[tuple[int, str]] = field(default_factory=list)
+    net_dir: Optional[str] = None  # host dir of Unix sockets, mounted read-only
+    # Secret env vars for the agent. Delivered through an inherited pipe fd --
+    # never argv, never disk -- and deliberately absent from to_dict().
+    secret_env: dict[str, str] = field(default_factory=dict, repr=False)
 
     def to_dict(self) -> dict:
         return {
             "network": self.network,
             "env_keys": sorted(self.env.keys()),  # values may be secret/host-specific
+            "secret_env_keys": sorted(self.secret_env.keys()),  # names only
             "limits": self.limits.to_dict(),
             "trace_syscalls": self.trace_syscalls,
             # Only the sandbox-side path; host paths are not reported.
             "ro_mounts": sorted(dst for _src, dst in self.ro_mounts),
+            "forward_ports": sorted(port for port, _sock in self.forwards),
         }
 
 

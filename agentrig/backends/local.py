@@ -16,6 +16,7 @@ never execute an attack scenario on the bare host.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import signal
@@ -27,7 +28,8 @@ from typing import Optional
 
 from agentrig.backends import rss
 from agentrig.backends.base import (
-    NET_NONE,
+    LAUNCHER_PATH,
+    NET_MOUNT,
     SANDBOX_WORKDIR,
     Capabilities,
     ExecResult,
@@ -43,6 +45,12 @@ TRACE_SYSCALLS = (
     "openat,open,openat2,connect,socket,execve,execveat,"
     "unlink,unlinkat,rename,renameat,renameat2"
 )
+
+# The in-sandbox launcher (loopback forwards + secret env), and the interpreter
+# that runs it inside the sandbox (the host's /usr is mounted read-only).
+_LAUNCHER_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "inside.py")
+_LAUNCHER_PYTHON = "/usr/bin/python3"
+LAUNCHER_ARGV_PREFIX = [_LAUNCHER_PYTHON, "-I", "-S", LAUNCHER_PATH]
 
 # usr-merge symlinks recreated inside the sandbox so /bin/sh etc. resolve.
 _USRMERGE_SYMLINKS = [
@@ -99,6 +107,13 @@ class LocalBackend(SandboxBackend):
         notes["strace"] = (
             f"present ({strace})" if strace else "not found; syscall observation off"
         )
+        if net_iso:
+            notes["network"] = (
+                "every sandbox gets its own network namespace (bwrap --unshare-net); "
+                "only bridged fake services and the recording egress gate are reachable")
+        if not os.path.exists(_LAUNCHER_PYTHON):
+            notes["launcher"] = (f"{_LAUNCHER_PYTHON} missing: loopback forwards and "
+                                 "secret env are unavailable (such runs error out)")
 
         self._caps = Capabilities(
             backend=self.name,
@@ -244,7 +259,27 @@ class LocalBackend(SandboxBackend):
         # Layer 3: bubblewrap isolation.
         cmd += self._bwrap_args(handle)
 
-        # Layer 4: the agent.
+        # Layer 4: the agent -- behind the in-sandbox launcher when it needs
+        # loopback forwards or secret env. The launcher config (which may hold
+        # secrets) travels through an inherited pipe: never argv, never disk.
+        pass_fds: tuple[int, ...] = ()
+        cfg_fd = None
+        if spec.forwards or spec.secret_env:
+            if not os.path.exists(_LAUNCHER_PYTHON):
+                raise BackendError(caps.notes.get("launcher", "launcher unavailable"))
+            cfg = {"forwards": [{"port": port, "unix": f"{NET_MOUNT}/{sock}"}
+                                for port, sock in spec.forwards],
+                   "env": dict(spec.secret_env)}
+            cfg_fd, wfd = os.pipe()
+            data = json.dumps(cfg).encode("utf-8")
+            if len(data) > 60000:  # stay under the pipe buffer; no writer thread
+                os.close(cfg_fd)
+                os.close(wfd)
+                raise BackendError("launcher config too large")
+            os.write(wfd, data)
+            os.close(wfd)
+            pass_fds = (cfg_fd,)
+            cmd += LAUNCHER_ARGV_PREFIX + [str(cfg_fd), "--"]
         cmd += list(argv)
 
         env = self._sandbox_env_passthrough()
@@ -263,12 +298,16 @@ class LocalBackend(SandboxBackend):
         try:
             proc = subprocess.Popen(
                 cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, env=env, text=True,
+                stderr=subprocess.PIPE, env=env, text=True, errors="replace",
                 start_new_session=True,  # own process group for clean kill
+                pass_fds=pass_fds,
             )
         except OSError as exc:
             stop_poll.set()
             raise BackendError(f"failed to launch sandbox command: {exc}") from exc
+        finally:
+            if cfg_fd is not None:
+                os.close(cfg_fd)
 
         try:
             out, err = proc.communicate(input=stdin, timeout=wall)
@@ -319,9 +358,15 @@ class LocalBackend(SandboxBackend):
         for host_path, sandbox_path in spec.ro_mounts:
             if os.path.exists(host_path):
                 args += ["--ro-bind", host_path, sandbox_path]
+        if spec.forwards or spec.secret_env:
+            args += ["--ro-bind", _LAUNCHER_SRC, LAUNCHER_PATH]
+        if spec.net_dir:
+            args += ["--ro-bind", spec.net_dir, NET_MOUNT]
         args += ["--bind", handle.work_dir, SANDBOX_WORKDIR, "--chdir", SANDBOX_WORKDIR]
-        if spec.network == NET_NONE:
-            args += ["--unshare-net"]
+        # Egress is enforced, not just recorded: every sandbox -- "none" and
+        # "loopback" alike -- gets its own network namespace with only `lo`.
+        # Scenario services and the egress gate are bridged in by the launcher.
+        args += ["--unshare-net"]
         # Controlled environment: clear everything, then set only what we choose.
         args += ["--clearenv"]
         for key, value in self._agent_env(handle).items():

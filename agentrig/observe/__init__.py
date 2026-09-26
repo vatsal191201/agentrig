@@ -1,34 +1,44 @@
 """Observation layer: assemble raw run artifacts into normalized evidence.
 
 The verdict engine and the report card both consume :class:`Observation`. It
-unifies three independent sources of truth:
+unifies four independent sources of truth:
 
   * strace  -> reads, out-of-scope writes (allowed or denied), spawns, connects
   * the file manifest -> authoritative created/modified/deleted inside /work
   * fake-service logs -> exactly what the agent transmitted, and where
+  * the egress gate -> every attempt to leave the sandbox, allowed or blocked
 
-Keeping these three separate and then merging them is deliberate: no single
-source can see everything, and a security verdict should never rest on one.
+Keeping these separate and then merging them is deliberate: no single source
+can see everything, and a security verdict should never rest on one.
+
+Every outbound attempt also becomes an **egress receipt**: destination, bytes,
+payload SHA-256, which seeded file(s) the payload carried (by content), and
+whether it was allowed or blocked.
 """
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Optional
 
 from agentrig.backends.base import SANDBOX_WORKDIR, ExecResult
 from agentrig.observe.fakes import LoggedRequest
+from agentrig.observe.gate import GateRecord
 from agentrig.observe.manifest import ManifestDiff
+from agentrig.observe.matching import encoded_forms, reveals
 from agentrig.observe.strace_parse import parse_trace
 from agentrig.util import sha256_text, truncate
 
 __all__ = ["Observation", "assemble", "ManifestDiff", "LoggedRequest",
-           "parse_trace"]
+           "parse_trace", "match_seeded_files"]
+
+_LOOPBACK = ("127.", "::1")
 
 
 @dataclass
 class Observation:
-    """Everything we managed to observe about one scenario run."""
+    """Everything we managed to observe about one agent run (one phase)."""
 
     events: list[dict] = field(default_factory=list)
     manifest_diff: Optional[ManifestDiff] = None
@@ -39,6 +49,12 @@ class Observation:
     stdout: str = ""
     stderr: str = ""
     trace_available: bool = False
+    egress: list[dict] = field(default_factory=list)  # receipts
+    llm_api: Optional[dict] = None  # None when no LLM endpoint was configured
+    gate_port: Optional[int] = None
+    # (egress event, full request blob) -- in memory only, never serialized, so
+    # checks see whole payloads rather than the report's truncated previews.
+    raw_egress: list[tuple[dict, bytes]] = field(default_factory=list, repr=False)
 
     # -- convenience predicates used by verdict checks ---------------------
 
@@ -67,6 +83,11 @@ class Observation:
     def egress_requests(self) -> list[dict]:
         return self._of("egress_request")
 
+    def gate_blocked(self) -> list[dict]:
+        """Attempts the egress gate refused (always observable, no trace needed)."""
+        return [r for r in self.egress if r.get("channel") == "gate"
+                and not r.get("allowed")]
+
     def created(self) -> list[str]:
         return list(self.manifest_diff.created) if self.manifest_diff else []
 
@@ -89,10 +110,35 @@ class Observation:
             "process_spawns": self.spawns(),
             "connects": self.connects(),
             "egress_requests": self.egress_requests(),
+            "egress_receipts": self.egress,
+            "llm_api": self.llm_api,
             "manifest_diff": self.manifest_diff.to_dict() if self.manifest_diff else None,
             "stdout": truncate(self.stdout),
             "stderr": truncate(self.stderr),
         }
+
+
+def match_seeded_files(payload: bytes, blob: bytes,
+                       seeded: dict[str, bytes]) -> list[dict]:
+    """Which seeded files does this outbound payload carry, and how?"""
+    out: list[dict] = []
+    digest = hashlib.sha256(payload).hexdigest() if payload else None
+    for rel, content in sorted(seeded.items()):
+        if not content:
+            continue
+        if digest and hashlib.sha256(content).hexdigest() == digest:
+            out.append({"file": rel, "how": "exact"})
+        elif len(content) >= 8 and content in blob:
+            out.append({"file": rel, "how": "verbatim"})
+        elif len(content) >= 8 and any(
+                f in blob for f in encoded_forms(content, full=False)[1:]):
+            out.append({"file": rel, "how": "base64"})
+    return out
+
+
+def _canaries_in(blob: bytes, canaries: dict[str, str]) -> list[str]:
+    return [name for name, value in canaries.items()
+            if value and reveals(blob, value.encode("utf-8"))]
 
 
 def assemble(
@@ -103,6 +149,12 @@ def assemble(
     *,
     workdir: str = SANDBOX_WORKDIR,
     agent_mounts: tuple[str, ...] = (),
+    service_ports: Optional[dict[str, int]] = None,
+    gate_records: Optional[list[GateRecord]] = None,
+    gate_port: Optional[int] = None,
+    seeded_files: Optional[dict[str, bytes]] = None,
+    llm_configured: bool = False,
+    scrubber=None,
 ) -> Observation:
     """Merge raw artifacts into a single ordered, normalized Observation.
 
@@ -111,7 +163,16 @@ def assemble(
     bytecode-cache write -- are infrastructure, not scenario scope, so they are
     filtered out of the out-of-scope-write signal.
     """
+    service_ports = service_ports or {}
+    seeded = seeded_files or {}
     events: list[dict] = []
+    receipts: list[dict] = []
+    raw_egress: list[tuple[dict, bytes]] = []
+
+    def payload_digest(payload: bytes) -> tuple[Optional[str], bool]:
+        if scrubber and scrubber.contains_secret(payload):
+            return None, True  # never publish a digest of a run secret
+        return hashlib.sha256(payload).hexdigest(), False
 
     # 1) syscall-level events (in trace order) -- reads, out-of-scope writes,
     #    spawns, connects.
@@ -128,20 +189,119 @@ def assemble(
     for path in sorted(manifest_diff.deleted):
         events.append({"type": "workfile_deleted", "path": f"{workdir}/{path}"})
 
-    # 3) exactly what was transmitted, scanned for the decoy secret(s).
+    # 3) exactly what was transmitted to fake services, scanned for the decoy
+    #    secret(s) in path, headers and body (verbatim or encoded).
     for svc_name, reqs in sorted(service_requests.items()):
         for req in reqs:
-            matched = [name for name, value in canaries.items()
-                       if value and value in req.body]
-            events.append({
+            blob = req.blob()
+            ev = {
                 "type": "egress_request",
+                "channel": "service",
                 "service": svc_name,
                 "method": req.method,
                 "path": req.path,
+                "headers": req.shown_headers(),
                 "body_sha256": sha256_text(req.body),
                 "body_preview": truncate(req.body, 500),
-                "contains_canaries": matched,
+                "contains_canaries": _canaries_in(blob, canaries),
+                "allowed": True,
+            }
+            events.append(ev)
+            raw_egress.append((ev, blob))
+            digest, redacted = payload_digest(req.raw)
+            port = service_ports.get(svc_name)
+            receipts.append({
+                "channel": "service",
+                "destination": f"{svc_name} (127.0.0.1:{port})" if port else svc_name,
+                "method": req.method,
+                "path": req.path,
+                "bytes_out": len(req.raw),
+                "payload_sha256": digest,
+                "payload_redacted": redacted,
+                "matched_seeded_files": match_seeded_files(req.raw, blob, seeded),
+                "contains_canaries": ev["contains_canaries"],
+                "allowed": True,
+                "outcome": "delivered to a scenario fake service (never the internet)",
             })
+
+    # 4) the egress gate: the only way out of the sandbox network namespace.
+    llm = {"tunnels": 0, "bytes_up": 0, "bytes_down": 0} if llm_configured else None
+    for rec in gate_records or []:
+        if rec.kind == "llm_api" and rec.allowed:
+            if llm is not None:
+                llm["tunnels"] += 1
+                llm["bytes_up"] += rec.bytes_up
+                llm["bytes_down"] += rec.bytes_down
+            events.append({"type": "llm_api", "destination": rec.destination,
+                           "bytes_up": rec.bytes_up, "bytes_down": rec.bytes_down})
+            receipts.append({
+                "channel": "gate", "kind": "llm_api",
+                "destination": rec.destination, "method": "CONNECT",
+                "bytes_out": rec.bytes_up, "bytes_in": rec.bytes_down,
+                "payload_sha256": None, "payload_redacted": False,
+                "matched_seeded_files": [], "contains_canaries": [],
+                "allowed": True,
+                "outcome": "tunneled to the configured LLM API (TLS; payload "
+                           "not inspected)" + (f"; {rec.note}" if "failed" in rec.note else ""),
+            })
+            continue
+        blob = rec.blob()
+        canary_hits = _canaries_in(blob, canaries)
+        if rec.method == "CONNECT":
+            events.append({"type": "egress_blocked", "channel": "gate",
+                           "method": "CONNECT", "destination": rec.destination,
+                           "contains_canaries": canary_hits})
+        else:
+            ev = {
+                "type": "egress_request", "channel": "gate",
+                "service": f"gate:{rec.destination}", "method": rec.method,
+                "path": rec.url or "", "headers": {},
+                "body_sha256": sha256_text(rec.payload.decode("utf-8", "replace")),
+                "body_preview": truncate(rec.payload.decode("utf-8", "replace"), 500),
+                "contains_canaries": canary_hits, "allowed": False,
+            }
+            events.append(ev)
+            raw_egress.append((ev, blob))
+        digest, redacted = payload_digest(rec.payload) if rec.payload else (None, False)
+        receipts.append({
+            "channel": "gate", "kind": "agent",
+            "destination": rec.destination, "method": rec.method,
+            "url": rec.url, "bytes_out": rec.bytes_up,
+            "payload_sha256": digest, "payload_redacted": redacted,
+            "matched_seeded_files": match_seeded_files(rec.payload, blob, seeded)
+            if rec.payload else [],
+            "contains_canaries": canary_hits,
+            "allowed": False,
+            "outcome": "blocked by the egress gate (" + rec.note + ")",
+        })
+
+    # 5) direct connects that bypassed the bridges: nothing is routable from the
+    #    sandbox's own network namespace, so none of these left the sandbox.
+    bridge_ports = set(service_ports.values()) | ({gate_port} if gate_port else set())
+    for c in (e for e in events if e.get("type") == "connect"):
+        addr = c.get("addr") or ""
+        if addr.startswith(_LOOPBACK) and c.get("port") in bridge_ports:
+            continue  # transport to a fake service or the gate; receipted above
+        receipts.append({
+            "channel": "direct", "destination": f"{addr}:{c.get('port')}",
+            "method": "connect", "bytes_out": None, "payload_sha256": None,
+            "payload_redacted": False, "matched_seeded_files": [],
+            "contains_canaries": [], "allowed": False,
+            "outcome": f"did not leave the sandbox: its network namespace has no "
+                       f"route out (connect result: {c.get('result')}"
+                       + (f" {c.get('errno')}" if c.get("errno") else "") + ")",
+        })
+
+    stdout, stderr = exec_result.stdout, exec_result.stderr
+    if scrubber:
+        stdout, stderr = scrubber.text(stdout), scrubber.text(stderr)
+        events = scrubber.deep(events)
+        receipts = scrubber.deep(receipts)
+        # Re-point raw payloads at the scrubbed event copies. Every
+        # egress_request event was appended exactly once, in the same order
+        # as raw_egress, so the two sequences line up.
+        scrubbed_reqs = [e for e in events if e.get("type") == "egress_request"]
+        raw_egress = [(ev, blob) for ev, (_old, blob) in zip(scrubbed_reqs, raw_egress)]
 
     return Observation(
         events=events,
@@ -150,7 +310,11 @@ def assemble(
         timed_out=exec_result.timed_out,
         duration_s=exec_result.duration_s,
         peak_rss_kb=exec_result.peak_rss_kb,
-        stdout=exec_result.stdout,
-        stderr=exec_result.stderr,
+        stdout=stdout,
+        stderr=stderr,
         trace_available=trace_available,
+        egress=receipts,
+        llm_api=llm,
+        gate_port=gate_port,
+        raw_egress=raw_egress,
     )
