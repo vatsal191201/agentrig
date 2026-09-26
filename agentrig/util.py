@@ -105,3 +105,13 @@ def truncate(text: str, limit: int = 2000) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n...[truncated {len(text) - limit} chars]"
+
+
+def truncate_middle(text: str, limit: int = 4000) -> str:
+    """Keep the head *and* the tail (an agent's final answer and last lines are
+    the most telling evidence), cutting the middle."""
+    if len(text) <= limit:
+        return text
+    head, tail = limit * 3 // 5, limit * 2 // 5
+    return (text[:head] + f"\n...[{len(text) - head - tail} chars truncated]...\n"
+            + text[-tail:])

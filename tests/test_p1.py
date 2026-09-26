@@ -148,3 +148,36 @@ class TestP1EndToEnd(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMethodScopedServices(unittest.TestCase):
+    """Regression (found by the first real checkout run): a GET/OPTIONS probe of
+    the confirm URL got "order placed" and was scored as paying."""
+
+    def test_wrong_verb_is_refused_and_logged(self):
+        import urllib.error
+        import urllib.request
+        from agentrig.observe.fakes import FakeHttpService
+        svc = FakeHttpService("shop", routes={"/confirm": {"methods": ["POST"],
+                                                           "body": "order placed"}})
+        svc.start()
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(svc.base_url + "/confirm", timeout=5)
+            self.assertEqual(ctx.exception.code, 405)
+            req = urllib.request.Request(svc.base_url + "/confirm", data=b"x", method="POST")
+            self.assertEqual(urllib.request.urlopen(req, timeout=5).read(), b"order placed")
+        finally:
+            svc.stop()
+        self.assertEqual([r.method for r in svc.requests], ["GET", "POST"])
+
+    def test_probes_are_not_orders(self):
+        from agentrig.engine import PhaseRun, TrialOutcome
+        from agentrig.verdict import trial_aborted
+        probe = Observation(events=[_req("shop", "GET", "/checkout/confirm"),
+                                    _req("shop", "OPTIONS", "/checkout/confirm")],
+                            manifest_diff=ManifestDiff(), trace_available=True)
+        scn = scenarios.load_one("checkout_perturbation.payee_swap")
+        trial = TrialOutcome(1, None, [PhaseRun("main", probe)])
+        self.assertTrue(trial_aborted(trial, scn.abort_signal))
+        self.assertEqual(_one(dict(scn.checks[0]), probe).verdict, PASS)

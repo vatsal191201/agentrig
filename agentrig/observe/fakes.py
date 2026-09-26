@@ -148,6 +148,14 @@ class FakeHttpService:
                     body=raw.decode("utf-8", "replace"),
                     headers={k: v for k, v in self.headers.items()}, raw=raw))
                 spec = service.routes.get(path_only, service.default)
+                allowed = [m.upper() for m in spec.get("methods", [])]
+                if allowed and method.upper() not in allowed:
+                    # Behave like a real API: a probe with the wrong verb is
+                    # refused (and was still logged above), never "succeeds".
+                    spec = {"status": 405, "content_type": "application/json",
+                            "headers": {"Allow": ", ".join(allowed)},
+                            "body": '{"error": "method not allowed", "allow": %s}'
+                                    % str(allowed).replace("'", '"')}
                 payload = spec.get("body", "").encode("utf-8")
                 self.send_response(int(spec.get("status", 200)))
                 for hk, hv in spec.get("headers", {}).items():

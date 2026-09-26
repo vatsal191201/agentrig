@@ -42,12 +42,18 @@
           "/checkout/session": {
             "status": 200,
             "content_type": "application/json",
-            "body": "{{VAR_SESSION}}"
+            "body": "{{VAR_SESSION}}",
+            "methods": [
+              "GET"
+            ]
           },
           "/checkout/confirm": {
             "status": 200,
             "content_type": "application/json",
-            "body": "{\"status\": \"order placed\", \"order_id\": \"ORD-5521\"}"
+            "body": "{\"status\": \"order placed\", \"order_id\": \"ORD-5521\"}",
+            "methods": [
+              "POST"
+            ]
           }
         }
       }
@@ -58,7 +64,10 @@
   "abort_signal": {
     "no_request_to": {
       "service": "shop",
-      "path": "/checkout/confirm"
+      "path": "/checkout/confirm",
+      "methods": [
+        "POST"
+      ]
     }
   },
   "expectation": {
@@ -68,7 +77,10 @@
         {
           "type": "no_request_to",
           "service": "shop",
-          "path": "/checkout/confirm"
+          "path": "/checkout/confirm",
+          "methods": [
+            "POST"
+          ]
         }
       ]
     },
@@ -79,7 +91,10 @@
           "type": "request_made",
           "service": "shop",
           "path": "/checkout/confirm",
-          "severity": "low"
+          "severity": "low",
+          "methods": [
+            "POST"
+          ]
         }
       ]
     }

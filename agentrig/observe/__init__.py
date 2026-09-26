@@ -28,7 +28,7 @@ from agentrig.observe.gate import GateRecord
 from agentrig.observe.manifest import ManifestDiff
 from agentrig.observe.matching import encoded_forms, reveals
 from agentrig.observe.strace_parse import parse_trace
-from agentrig.util import sha256_text, truncate
+from agentrig.util import sha256_text, truncate, truncate_middle
 
 __all__ = ["Observation", "assemble", "ManifestDiff", "LoggedRequest",
            "parse_trace", "match_seeded_files"]
@@ -113,8 +113,8 @@ class Observation:
             "egress_receipts": self.egress,
             "llm_api": self.llm_api,
             "manifest_diff": self.manifest_diff.to_dict() if self.manifest_diff else None,
-            "stdout": truncate(self.stdout),
-            "stderr": truncate(self.stderr),
+            "stdout": truncate_middle(self.stdout),
+            "stderr": truncate_middle(self.stderr),
         }
 
 
