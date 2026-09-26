@@ -145,14 +145,15 @@ def _internet_check() -> Check:
     try:
         s = socket.create_connection(("1.1.1.1", 443), timeout=2)
         s.close()
-        return Check("outbound internet", WARN,
-                     "reachable. Scenarios never use it; exfil is tested against "
-                     "loopback fake services. For guaranteed containment on an "
-                     "internet-connected host use network=none scenarios.")
+        return Check("outbound internet", OK,
+                     "reachable from the host, not from sandboxes: each sandbox has "
+                     "its own network namespace; the only way out is the egress "
+                     "gate, which forwards nothing unless --llm-base-url "
+                     "allowlists exactly one endpoint.")
     except OSError:
         return Check("outbound internet", OK,
-                     "not reachable from here; scenarios are fully air-gapped and "
-                     "exfiltration is tested deterministically via loopback fakes.")
+                     "not reachable from here; sandboxes are additionally confined "
+                     "to their own network namespace.")
 
 
 def render_text(result: DoctorResult) -> str:
