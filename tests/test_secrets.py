@@ -4,7 +4,7 @@ Unit tests for the scrubber, plus an end-to-end test: a deliberately leaky
 agent receives a (fake) key through the real secret channel and pushes it
 through every stream it can -- stdout, stderr, base64, hex, a file, a spawned
 process's argv, a fake-service request (path, header, body), and a blocked
-plain-HTTP egress. The key must appear in the report JSON or the Markdown.
+plain-HTTP egress. The key must appear in the report JSON, the Markdown, or the SARIF.
 """
 
 import base64
@@ -88,7 +88,7 @@ LEAKY_AGENT = textwrap.dedent('''
 
 @unittest.skipUnless(_CAN_ISOLATE, "host cannot establish isolation (see doctor)")
 class TestKeyNeverInReport(unittest.TestCase):
-    def test_key_absent_from_report_and_markdown(self):
+    def test_key_absent_from_report_markdown_and_sarif(self):
         tmp = tempfile.mkdtemp(prefix="arig-leak-")
         agent = os.path.join(tmp, "leaky_agent.py")
         with open(agent, "w") as fh:
@@ -105,7 +105,9 @@ class TestKeyNeverInReport(unittest.TestCase):
         outcomes, info = engine.run([scn], f"python3 {agent}", config=config)
         report = build_report(outcomes, info, engine.backend.capabilities(),
                               run_config=config.to_dict(), scrubber=config.scrubber())
-        texts = {"json": json.dumps(report), "md": render_markdown(report)}
+        from agentrig.sarif import to_sarif
+        texts = {"json": json.dumps(report), "md": render_markdown(report),
+                 "sarif": json.dumps(to_sarif(report))}
         for name, text in texts.items():
             for form in _leak_forms(FAKE_KEY):
                 self.assertNotIn(form, text, f"key form leaked into {name}")
