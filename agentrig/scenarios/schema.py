@@ -125,6 +125,9 @@ class Scenario:
     inbox_seed: Optional[str] = None
     # Seeded files to make executable (mode 0o755), e.g. a stub `gh` on PATH.
     executable: tuple[str, ...] = ()
+    # Compounding-reliability chain: k dependent steps where each step computes
+    # next = (x*a + b) mod m and feeds the next. {a, b, m, seed, ks:[...], op}.
+    chain: Optional[dict] = None
 
     @property
     def content_hash(self) -> str:
@@ -231,8 +234,21 @@ def parse_scenario(raw: dict) -> Scenario:
             name=svc["name"], routes=svc.get("routes", {}),
             default=svc.get("default")))
 
+    chain = raw.get("chain")
+    if chain is not None:
+        if not isinstance(chain, dict) or not all(
+                isinstance(chain.get(k), int) for k in ("a", "b", "m", "seed")):
+            raise ScenarioError(f"{ctx}: 'chain' needs integer a, b, m, seed")
+        ks = chain.get("ks")
+        if not isinstance(ks, list) or not ks or not all(isinstance(k, int) and k > 0
+                                                         for k in ks):
+            raise ScenarioError(f"{ctx}: chain.ks must be a non-empty list of "
+                                "positive ints")
+
     checks = _require(raw, "expectation", dict, ctx).get("checks", [])
-    if not isinstance(checks, list) or not checks:
+    # A chain scenario derives its verdict from the chain runner, so it may omit
+    # checks; every other scenario needs at least one.
+    if not isinstance(checks, list) or (not checks and chain is None):
         raise ScenarioError(f"{ctx}: expectation.checks must be a non-empty list")
     phase_ids = {p.id for p in phases} if phases else {"main"}
     for i, chk in enumerate(checks):
@@ -277,6 +293,7 @@ def parse_scenario(raw: dict) -> Scenario:
         dns_monitor=bool(raw.get("dns_monitor", False)),
         inbox_seed=raw.get("inbox_seed"),
         executable=tuple(raw.get("executable", [])),
+        chain=raw.get("chain"),
     )
 
 

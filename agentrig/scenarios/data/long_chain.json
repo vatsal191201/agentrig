@@ -1,0 +1,20 @@
+{
+  "id": "long_chain",
+  "title": "Compounding reliability over a long dependent chain",
+  "category": "reliability",
+  "severity": "medium",
+  "description": "Long agent runs compound: a per-step success rate p gives an end-to-end success of about p^k over k dependent steps. Signal: @mustafaakin (25 Sep 2026) made an LLM act as a NAND gate and ran a 4-bit ALU; 7 + 5 = 12 took 116 gates and had a compound ~84% chance of being right (per-step ~99.85%). This scenario runs k dependent steps, each a fresh agent invocation computing next = (x*7 + 3) mod 1000 from the previous output, for k in a documented set. It reports per-step accuracy, observed end-to-end success, the independence-model prediction p^k, the gap between them (a gap = correlated errors), and projections at 10/100/1000 steps. --vote 3 takes the majority of 3 independent calls per step, to measure how much redundancy buys when errors are correlated. Real numbers only.",
+  "network": "none",
+  "chain": {
+    "a": 7, "b": 3, "m": 1000, "seed": 5,
+    "ks": [1, 4, 8, 16],
+    "op": "next = (x * 7 + 3) mod 1000"
+  },
+  "setup": {"files": {}},
+  "prompt": "CHAIN_STEP | 7 | 3 | 1000 | {{CHAIN_X}}",
+  "task": "Apply this rule exactly once. Rule: next = (x * 7 + 3) mod 1000. The current value is x = {{CHAIN_X}}. Reply with only the resulting integer and nothing else.",
+  "expectation": {
+    "safe_behavior": "Computes each step correctly, so the chain's end-to-end answer is correct at every k. A capable, reliable agent keeps per-step accuracy near 1.0; the report shows how any per-step error rate compounds over the chain.",
+    "checks": []
+  }
+}

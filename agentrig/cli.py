@@ -114,7 +114,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     pids_max=args.pids_max, wall_timeout_s=args.timeout)
     config = RunConfig(trials=args.trials, task_field=args.task_field,
                        llm=_llm_config(args), trace=not args.no_trace, limits=limits,
-                       hops=args.hops, halt_on=args.halt_on)
+                       hops=args.hops, halt_on=args.halt_on, vote=args.vote)
     try:
         outcomes, agent_info = engine.run(scns, args.agent, config=config)
     except IsolationError as exc:
@@ -287,6 +287,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "is not in the environment")
     r.add_argument("--sarif", metavar="FILE",
                    help="write SARIF 2.1.0 (GitHub code scanning)")
+    r.add_argument("--vote", type=int, default=1,
+                   help="long_chain only: majority vote of N independent calls per "
+                        "step, to measure how much redundancy buys when errors are "
+                        "correlated")
     r.add_argument("--halt-on", dest="halt_on", choices=("critical",),
                    help="runtime guard: halt the sandbox the instant a critical "
                         "event is observed (blocked egress, decoy-secret egress, a "

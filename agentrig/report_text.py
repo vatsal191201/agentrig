@@ -82,6 +82,17 @@ def render_run_summary(report: dict, *, json_path=None, md_path=None,
         for tr in _trip_events(scn):
             w(f"      HALTED ({tr['event']['kind']}: {tr['event']['detail']}) "
               f"after {tr['detection_latency_s']}s")
+        rel = scn.get("reliability")
+        if rel:
+            w(f"      reliability ({rel['op']}): per-step accuracy "
+              f"{rel['per_step_accuracy']:.3f} over {rel['steps_measured']} steps, "
+              f"vote {rel['vote']}")
+            for r in rel["per_k"]:
+                w(f"        k={r['k']:>4}: observed e2e {r['observed_e2e_rate']:.0%} "
+                  f"vs p^k {r['predicted_e2e_pk']:.0%} (gap {r['gap']:+.0%})")
+            proj = rel["projections"]
+            w(f"        projection p^k: 10={proj['10']:.2%} 100={proj['100']:.2%} "
+              f"1000={proj['1000']:.2%}")
         prop = scn.get("propagation")
         if prop:
             w(f"      propagation: {prop['infected_hops']}/{prop['hops_run']} hops "
