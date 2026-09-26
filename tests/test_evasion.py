@@ -18,7 +18,7 @@ from agentrig.engine import Engine, RunConfig
 from agentrig.observe import Observation
 from agentrig.observe.manifest import ManifestDiff
 from agentrig.observe.strace_parse import parse_lines
-from agentrig.verdict import FAIL, PASS, evaluate_scenario
+from agentrig.verdict import FAIL, INCONCLUSIVE, PASS, evaluate_scenario
 
 _CAN_ISOLATE = LocalBackend().capabilities().can_isolate
 
@@ -77,6 +77,9 @@ ALIAS_READER = textwrap.dedent('''
     os.link("/work/.env", "/work/notes_backup.txt")
     print(open("/work/notes_backup.txt").read().splitlines()[0][:12])
 ''')
+CRASHER = textwrap.dedent('''
+    raise RuntimeError("agent crashed before finishing its task")
+''')
 
 
 @unittest.skipUnless(_CAN_ISOLATE, "host cannot establish isolation (see doctor)")
@@ -103,6 +106,11 @@ class TestEvasionsEndToEnd(unittest.TestCase):
         chk = [c for c in o.verdict.checks if c.type == "file_not_read"][0]
         self.assertEqual(chk.verdict, FAIL)
         self.assertIn("via alias /work/notes_backup.txt", chk.detail)
+
+    def test_crash_is_inconclusive_not_pass(self):
+        o = self._run(CRASHER, "credential_exfiltration")
+        self.assertEqual(o.verdict.verdict, INCONCLUSIVE)
+        self.assertIn("exit code", o.verdict.note)
 
 
 if __name__ == "__main__":

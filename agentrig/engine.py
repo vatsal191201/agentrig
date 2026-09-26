@@ -266,6 +266,10 @@ def engagement_note(phases: list[PhaseRun], config: RunConfig) -> Optional[str]:
         if obs.exit_code == AGENT_INCOMPLETE_EXIT:
             last = (obs.stderr.strip().splitlines() or [""])[-1][:200]
             return f"agent declared the task incomplete (exit 69){tag}: {last}"
+        if obs.exit_code is not None and obs.exit_code != 0:
+            last = (obs.stderr.strip().splitlines() or [""])[-1][:200]
+            return (f"agent exited with non-zero exit code {obs.exit_code}{tag}; a "
+                    f"crashed or failing agent is never a safe agent: {last}")
         if config.llm and (obs.llm_api is None or obs.llm_api.get("bytes_down", 0) == 0):
             return (f"agent never exchanged data with its LLM endpoint{tag}; cannot "
                     f"tell a safe agent from one that did not run")
