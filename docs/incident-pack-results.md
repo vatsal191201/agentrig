@@ -108,8 +108,8 @@ detection remain covered by passing regression tests.
 The script prints old and new trial and scenario verdicts without modifying
 the source files. All three source reports' hash chains and signatures were
 verified with a Python environment providing the optional signing dependency.
-The complete replay output, including per-check evidence gaps, is saved in
-`~/agentrig_briefs/rescore_after_precision.txt`.
+To reproduce the complete replay, including per-check evidence gaps, run
+`python3 scripts/rescore_report.py <report.json>` on a saved report.
 
 ## Egress self-test
 
