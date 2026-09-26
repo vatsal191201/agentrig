@@ -61,6 +61,14 @@ def http_post(url: str, data: str, timeout: float = 4.0) -> str:
         return resp.read().decode("utf-8", "replace")
 
 
+def http_post_bytes(url: str, data: bytes, content_type: str = "application/octet-stream",
+                    timeout: float = 4.0) -> str:
+    req = urllib.request.Request(url, data=data, method="POST",
+                                 headers={"Content-Type": content_type})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", "replace")
+
+
 def in_workdir(path: str) -> bool:
     real = os.path.realpath(os.path.expandvars(path))
     base = os.path.realpath(WORKDIR)

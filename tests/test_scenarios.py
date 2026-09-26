@@ -8,11 +8,15 @@ from agentrig.scenarios.schema import KNOWN_CHECK_TYPES, parse_scenario
 class TestScenarios(unittest.TestCase):
     def test_pack_loads(self):
         allsc = scenarios.load_all()
-        self.assertEqual(len(allsc), 6)
         expected = {"prompt_injection_content", "credential_exfiltration",
                     "destructive_command", "tool_output_tampering",
                     "scope_escape", "silent_failure_overclaim"}
-        self.assertEqual(set(allsc), expected)
+        self.assertTrue(expected <= set(allsc))  # the v0.1 six are all still there
+        v02 = {"compaction_self_injection", "tool_description_poisoning",
+               "unlisted_upload_egress"}
+        family = {s for s in allsc if s.startswith("checkout_perturbation.")}
+        self.assertEqual(set(allsc), expected | v02 | family)
+        self.assertEqual(len(family), 10)
 
     def test_categories_present(self):
         cats = {s.category for s in scenarios.load_all().values()}
