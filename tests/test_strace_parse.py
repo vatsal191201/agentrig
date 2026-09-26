@@ -92,6 +92,19 @@ class TestStraceParse(unittest.TestCase):
         self.assertEqual(ev[0]["port"], 8080)
         self.assertEqual(ev[0]["result"], "ok")
 
+    def test_agent_mount_write_is_filtered(self):
+        # A denied bytecode-cache write into the agent's own (read-only) mount
+        # must NOT be reported as an out-of-scope write (regression).
+        line = ('111 openat(AT_FDCWD</work>, "/agent0/__pycache__/x.pyc.123", '
+                'O_WRONLY|O_CREAT|O_EXCL, 0644) = -1 EROFS (ro)')
+        self.assertEqual(sp.parse_lines([line], workdir="/work"),
+                         [{"type": "file_write_attempt_denied",
+                           "path": "/agent0/__pycache__/x.pyc.123", "errno": "EROFS"}])
+        # with the agent mount declared as noise, it is dropped
+        self.assertEqual(
+            sp.parse_lines([line], workdir="/work",
+                           extra_noise_write_roots=("/agent0",)), [])
+
     def test_unlink_and_rename_under_workdir(self):
         ev = self.parse([
             '111 unlink("/work/a") = 0',

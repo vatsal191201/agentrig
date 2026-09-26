@@ -102,15 +102,23 @@ def assemble(
     canaries: dict[str, str],
     *,
     workdir: str = SANDBOX_WORKDIR,
+    agent_mounts: tuple[str, ...] = (),
 ) -> Observation:
-    """Merge raw artifacts into a single ordered, normalized Observation."""
+    """Merge raw artifacts into a single ordered, normalized Observation.
+
+    ``agent_mounts`` are the sandbox paths the agent-under-test's own code is
+    mounted at (read-only). Writes there -- e.g. an interpreter's denied
+    bytecode-cache write -- are infrastructure, not scenario scope, so they are
+    filtered out of the out-of-scope-write signal.
+    """
     events: list[dict] = []
 
     # 1) syscall-level events (in trace order) -- reads, out-of-scope writes,
     #    spawns, connects.
     trace_available = bool(exec_result.trace_path)
     if trace_available:
-        events.extend(parse_trace(exec_result.trace_path, workdir=workdir))
+        events.extend(parse_trace(exec_result.trace_path, workdir=workdir,
+                                  extra_noise_write_roots=tuple(agent_mounts)))
 
     # 2) authoritative workdir lifecycle from the manifest.
     for path in sorted(manifest_diff.created):

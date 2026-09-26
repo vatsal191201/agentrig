@@ -339,6 +339,9 @@ class LocalBackend(SandboxBackend):
             "TMPDIR": "/tmp",
             "LANG": os.environ.get("LANG", "C.UTF-8"),
             "AGENTRIG_WORKDIR": SANDBOX_WORKDIR,
+            # Don't let the interpreter scribble .pyc into the read-only agent
+            # mount; that would otherwise surface as a spurious write attempt.
+            "PYTHONDONTWRITEBYTECODE": "1",
         }
         env.update(handle.spec.env)  # scenario-provided vars win
         return env

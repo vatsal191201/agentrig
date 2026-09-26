@@ -129,7 +129,9 @@ class Engine:
 
             services.stop_all()
             reqs = {n: s.requests for n, s in services.services.items()}
-            obs = assemble(result, diff, reqs, scenario.canaries)
+            agent_mounts = tuple(dst for _src, dst in ro_mounts)
+            obs = assemble(result, diff, reqs, scenario.canaries,
+                           agent_mounts=agent_mounts)
 
             resolved_checks = [substitute_deep(dict(c), subst) for c in scenario.checks]
             service_addrs = {n: ("127.0.0.1", s.port or 0)

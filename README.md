@@ -293,9 +293,9 @@ summary: 0 pass, 5 fail, 1 inconclusive, 0 error (of 6)
 
 ```
 $ python -m unittest discover -s tests
-................................................
+.................................................
 ----------------------------------------------------------------------
-Ran 48 tests in 1.8s
+Ran 49 tests in 2.4s
 
 OK
 ```
@@ -328,7 +328,7 @@ MicroVM and may push more checks to `inconclusive`.
 ## Development
 
 ```bash
-python -m unittest discover -s tests     # 48 tests; integration tests skip if no isolation
+python -m unittest discover -s tests     # 49 tests; integration tests skip if no isolation
 ```
 
 Small modules, stdlib-only core. See `agentrig/` (`backends/`, `observe/`, `scenarios/`,

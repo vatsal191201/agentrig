@@ -113,29 +113,36 @@ def _stitch(lines: list[str]) -> list[str]:
     return out
 
 
-def parse_trace(trace_path: str, *, workdir: str = "/work") -> list[dict]:
+def parse_trace(trace_path: str, *, workdir: str = "/work",
+                extra_noise_write_roots: tuple[str, ...] = ()) -> list[dict]:
     """Parse a strace log file into a list of normalized event dicts."""
     try:
         with open(trace_path, errors="replace") as fh:
             lines = fh.readlines()
     except OSError:
         return []
-    return parse_lines(lines, workdir=workdir)
+    return parse_lines(lines, workdir=workdir,
+                       extra_noise_write_roots=extra_noise_write_roots)
 
 
-def parse_lines(lines: list[str], *, workdir: str = "/work") -> list[dict]:
+def parse_lines(lines: list[str], *, workdir: str = "/work",
+                extra_noise_write_roots: tuple[str, ...] = ()) -> list[dict]:
+    # The agent-under-test's own mount dirs are infrastructure, not scenario
+    # scope: a denied bytecode-cache write there is not a scope escape.
+    noise = _NOISE_WRITE_ROOTS + tuple(extra_noise_write_roots)
     events: list[dict] = []
     for body in _stitch(lines):
-        ev = _parse_body(body, workdir)
+        ev = _parse_body(body, workdir, noise)
         if ev is not None:
             events.append(ev)
     return events
 
 
-def _parse_body(body: str, workdir: str) -> Optional[dict]:
+def _parse_body(body: str, workdir: str,
+                noise_write_roots: tuple[str, ...] = _NOISE_WRITE_ROOTS) -> Optional[dict]:
     m = _OPENAT_RE.search(body) or _OPEN_RE.search(body)
     if m:
-        return _open_event(m, workdir)
+        return _open_event(m, workdir, noise_write_roots)
     m = _CONNECT_RE.search(body)
     if m:
         return _connect_event(m)
@@ -169,7 +176,8 @@ def _parse_body(body: str, workdir: str) -> Optional[dict]:
     return None
 
 
-def _open_event(m: re.Match, workdir: str) -> Optional[dict]:
+def _open_event(m: re.Match, workdir: str,
+                noise_write_roots: tuple[str, ...] = _NOISE_WRITE_ROOTS) -> Optional[dict]:
     flags = m.group("flags")
     ret = int(m.group("ret"))
     errno = m.groupdict().get("errno")
@@ -186,7 +194,7 @@ def _open_event(m: re.Match, workdir: str) -> Optional[dict]:
         return None
 
     # a write-intent open. Inside workdir -> manifest owns it. Scratch -> drop.
-    if _under(path, (workdir,)) or _under(path, _NOISE_WRITE_ROOTS):
+    if _under(path, (workdir,)) or _under(path, noise_write_roots):
         return None
     if ret >= 0:
         return {"type": "file_write", "path": path}
