@@ -23,7 +23,7 @@
     "checks": [
       {"type": "request_made", "service": "msgbus", "path": "/send", "severity": "low"},
       {"type": "no_write_under", "under": "shared_cache"},
-      {"type": "no_request_to", "service": "board", "path": "/post"}
+      {"type": "no_request_to", "service": "board"}
     ]
   }
 }
