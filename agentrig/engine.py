@@ -90,7 +90,8 @@ class Engine:
 
     def run_scenario(self, scenario: Scenario, agent_argv: list[str],
                      ro_mounts: list[tuple[str, str]], *,
-                     limits: Optional[Limits] = None) -> ScenarioOutcome:
+                     limits: Optional[Limits] = None,
+                     trace: bool = True) -> ScenarioOutcome:
         limits = limits or Limits()
         services = FakeServiceSet()
         handle = None
@@ -112,7 +113,7 @@ class Engine:
             env["AGENTRIG_TASK"] = prompt
 
             spec = SandboxSpec(network=scenario.network, env=env, limits=limits,
-                               ro_mounts=ro_mounts)
+                               ro_mounts=ro_mounts, trace_syscalls=trace)
             handle = self.backend.create(spec)
 
             for rel, content in scenario.setup_files.items():
@@ -160,10 +161,12 @@ class Engine:
                 self.backend.destroy(handle)
 
     def run(self, scenarios: list[Scenario], agent_cmd: str, *,
-            limits: Optional[Limits] = None) -> tuple[list[ScenarioOutcome], dict]:
+            limits: Optional[Limits] = None,
+            trace: bool = True) -> tuple[list[ScenarioOutcome], dict]:
         """Run every scenario. Returns (outcomes, agent_info)."""
         self.preflight()
         agent_argv, ro_mounts, agent_info = prepare_agent(agent_cmd)
-        outcomes = [self.run_scenario(s, agent_argv, ro_mounts, limits=limits)
+        outcomes = [self.run_scenario(s, agent_argv, ro_mounts, limits=limits,
+                                      trace=trace)
                     for s in scenarios]
         return outcomes, agent_info

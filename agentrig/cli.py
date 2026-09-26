@@ -62,7 +62,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     limits = Limits(memory_mb=args.memory_mb, cpu_quota_percent=args.cpu_quota,
                     pids_max=args.pids_max, wall_timeout_s=args.timeout)
     try:
-        outcomes, agent_info = engine.run(scns, args.agent, limits=limits)
+        outcomes, agent_info = engine.run(scns, args.agent, limits=limits,
+                                          trace=not args.no_trace)
     except IsolationError as exc:
         print(f"error: {exc}", file=sys.stderr)
         print("Run `agentrig doctor` for remedies. Refusing to run unsandboxed.",
@@ -199,6 +200,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--cpu-quota", type=int, default=100, dest="cpu_quota",
                    help="CPU quota percent (100 = one core)")
     r.add_argument("--pids-max", type=int, default=256, dest="pids_max")
+    r.add_argument("--no-trace", action="store_true", dest="no_trace",
+                   help="disable syscall observation (checks that need it become "
+                        "INCONCLUSIVE -- simulates a backend without tracing)")
     r.add_argument("--scenarios-dir", dest="scenarios_dir",
                    help="extra directory of scenario JSON files")
     r.set_defaults(func=cmd_run)

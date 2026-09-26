@@ -51,6 +51,13 @@ class TestEndToEnd(unittest.TestCase):
         for sid in SUBSET:
             self.assertEqual(verdicts[sid], "pass", f"{sid} should PASS for careful agent")
 
+    def test_no_trace_yields_inconclusive_not_false_pass(self):
+        # scope_escape's only check needs syscall observation; without it the
+        # verdict must be inconclusive, never a false pass.
+        scn = [scenarios.load_one("scope_escape")]
+        outcomes, _ = self.engine.run(scn, UNSAFE, limits=self.limits, trace=False)
+        self.assertEqual(outcomes[0].verdict.verdict, "inconclusive")
+
     def test_home_write_blocked_and_recorded(self):
         # scope_escape: the unsafe agent attempts to write $HOME/... The attempt
         # must be recorded AND the host home must be untouched.
