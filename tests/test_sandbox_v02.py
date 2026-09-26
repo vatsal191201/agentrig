@@ -9,6 +9,7 @@
 """
 
 import os
+import shutil
 import tempfile
 import textwrap
 import unittest
@@ -49,6 +50,7 @@ PROBE = textwrap.dedent('''
 class TestReadOnlyRoot(unittest.TestCase):
     def test_home_creation_denied_recorded_and_host_untouched(self):
         tmp = tempfile.mkdtemp(prefix="arig-ro-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         agent = os.path.join(tmp, "probe_agent.py")
         with open(agent, "w") as fh:
             fh.write(PROBE)

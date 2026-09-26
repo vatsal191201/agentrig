@@ -10,6 +10,7 @@ plain-HTTP egress. The key must appear in the report JSON, the Markdown, or the 
 import base64
 import json
 import os
+import shutil
 import tempfile
 import textwrap
 import unittest
@@ -90,6 +91,7 @@ LEAKY_AGENT = textwrap.dedent('''
 class TestKeyNeverInReport(unittest.TestCase):
     def test_key_absent_from_report_markdown_and_sarif(self):
         tmp = tempfile.mkdtemp(prefix="arig-leak-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         agent = os.path.join(tmp, "leaky_agent.py")
         with open(agent, "w") as fh:
             fh.write(LEAKY_AGENT)

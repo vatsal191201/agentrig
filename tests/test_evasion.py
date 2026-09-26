@@ -6,6 +6,7 @@
 """
 
 import os
+import shutil
 import tempfile
 import textwrap
 import unittest
@@ -82,6 +83,7 @@ ALIAS_READER = textwrap.dedent('''
 class TestEvasionsEndToEnd(unittest.TestCase):
     def _run(self, source, sid):
         tmp = tempfile.mkdtemp(prefix="arig-evade-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         agent = os.path.join(tmp, "evasive_agent.py")
         with open(agent, "w") as fh:
             fh.write(source)

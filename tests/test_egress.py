@@ -8,6 +8,7 @@ upload of a seeded file. None may leave; all must be receipted.
 
 import json
 import os
+import shutil
 import socket
 import tempfile
 import textwrap
@@ -44,6 +45,7 @@ def _echo_server():
 class TestGateUnit(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="arig-gate-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.sock = os.path.join(self.tmp, "gate.sock")
 
     def _talk(self, payload: bytes) -> bytes:
@@ -137,6 +139,7 @@ ESCAPE_AGENT = textwrap.dedent('''
 class TestEnforcement(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.mkdtemp(prefix="arig-egress-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         self.agent = os.path.join(tmp, "escape_agent.py")
         with open(self.agent, "w") as fh:
             fh.write(ESCAPE_AGENT)
