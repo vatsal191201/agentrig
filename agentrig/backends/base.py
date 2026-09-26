@@ -115,6 +115,14 @@ class SandboxSpec:
     #   {"unix": <socket file name in net_dir>, "port": 53,
     #    "resolv_conf": <host path bound over /etc/resolv.conf>}
     dns: Optional[dict] = None
+    # Share the host network namespace instead of unsharing it. DANGEROUS -- the
+    # sandbox can reach the real network. Only the egress self-test uses this, to
+    # ablate the netns layer with its own (non-hostile) probe. Never for scenarios.
+    share_net: bool = False
+    # Bind this host file over the sandbox's /etc/resolv.conf (independent of the
+    # DNS sink). Used by the egress self-test's netns-off config to give it a
+    # working resolver, so the ablation isolates the layer under test.
+    resolv_conf: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {

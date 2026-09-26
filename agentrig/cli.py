@@ -215,6 +215,15 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
+    if getattr(args, "egress", False):
+        from agentrig.backends import get_backend
+        from agentrig.egress_selftest import render_egress, run_egress_selftest
+        result = run_egress_selftest(get_backend(args.backend))
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(render_egress(result))
+        return EXIT_OK if result.get("secure") else EXIT_VERIFY_FAILED
     result = doctor_mod.run_doctor()
     if args.json:
         print(json.dumps(result.to_dict(), indent=2))
@@ -314,6 +323,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     d = sub.add_parser("doctor", help="probe host isolation capabilities")
     d.add_argument("--json", action="store_true")
+    d.add_argument("--egress", action="store_true",
+                   help="run escape probes from inside a real sandbox, with each "
+                        "isolation layer removed in turn, to show what blocks each")
+    d.add_argument("--backend", default="local", choices=available_backends())
     d.set_defaults(func=cmd_doctor)
     return p
 

@@ -191,5 +191,21 @@ class TestEnforcement(unittest.TestCase):
                             for r in obs.egress))
 
 
+@unittest.skipUnless(_CAN_ISOLATE, "host cannot establish isolation (see doctor)")
+class TestEgressSelfTest(unittest.TestCase):
+    def test_production_config_blocks_every_probe(self):
+        from agentrig.egress_selftest import render_egress, run_egress_selftest
+        result = run_egress_selftest(LocalBackend(), timeout=8)
+        self.assertTrue(result["available"])
+        # every probe must be BLOCKED in the production (netns + gate) config,
+        # regardless of whether this host has outbound internet.
+        for row in result["probes"]:
+            self.assertEqual(row["both"], "BLOCKED",
+                             f"{row['probe']} escaped in production: {row['raw']['both']}")
+        self.assertTrue(result["secure"])
+        self.assertEqual(result["leaked_in_production"], [])
+        self.assertIn("RESULT: every probe was BLOCKED", render_egress(result))
+
+
 if __name__ == "__main__":
     unittest.main()

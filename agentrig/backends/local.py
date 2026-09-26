@@ -377,10 +377,11 @@ class LocalBackend(SandboxBackend):
         # the sandbox), so bind over its real target: a /run path bwrap creates
         # in its tmpfs, or the regular file itself. If neither is bindable,
         # glibc falls back to 127.0.0.1 (the sink) on its own.
-        if spec.dns and spec.dns.get("resolv_conf"):
+        resolv_src = (spec.dns or {}).get("resolv_conf") or spec.resolv_conf
+        if resolv_src:
             target = os.path.realpath("/etc/resolv.conf")
             if not target.startswith("/etc/") or os.path.exists(target):
-                args += ["--ro-bind", spec.dns["resolv_conf"], target]
+                args += ["--ro-bind", resolv_src, target]
         args += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
         # Read-only mounts (e.g. the agent-under-test's code), added before the
         # workdir so /work always wins if paths ever overlap.
@@ -395,7 +396,10 @@ class LocalBackend(SandboxBackend):
         # Egress is enforced, not just recorded: every sandbox -- "none" and
         # "loopback" alike -- gets its own network namespace with only `lo`.
         # Scenario services and the egress gate are bridged in by the launcher.
-        args += ["--unshare-net"]
+        # (share_net skips this; only the egress self-test's own probe uses it,
+        # to show what the namespace layer alone was blocking.)
+        if not spec.share_net:
+            args += ["--unshare-net"]
         # The sandbox root is bwrap's private tmpfs. Make it read-only once the
         # mounts are in place, so `mkdir -p $HOME && cp ... $HOME/` is *denied*
         # (EROFS) rather than landing on the throwaway root: only /work and
