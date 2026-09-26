@@ -18,6 +18,8 @@ backend can establish isolation.
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import shlex
 import shutil
@@ -127,12 +129,35 @@ class ScenarioOutcome:
     stats: dict = field(default_factory=dict)
 
 
+def _python_sibling_imports(path: str) -> list[str]:
+    """Sibling modules a Python script imports from its own directory."""
+    import ast
+    try:
+        with open(path, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+    except (OSError, SyntaxError, ValueError):
+        return []
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            names.add(node.module.split(".")[0])
+    d = os.path.dirname(path)
+    return sorted(os.path.join(d, n + ".py") for n in names
+                  if os.path.isfile(os.path.join(d, n + ".py")))
+
+
 def prepare_agent(agent_cmd: str) -> tuple[list[str], list[tuple[str, str]], dict]:
     """Split the agent command and make any local script files available.
 
-    Local files (not under /usr or /bin) are exposed to the sandbox via a
-    read-only mount and the argument is rewritten to the in-sandbox path. Their
-    SHA-256 becomes the agent's "resolved version" -- honest and reproducible.
+    Local files (not under /usr or /bin) are exposed to the sandbox read-only
+    and the argument is rewritten to the in-sandbox path. Only the agent's own
+    file is mounted -- plus, for a Python script, the sibling modules it
+    imports -- never its whole directory: an LLM agent must not be able to
+    read neighbouring files (e.g. other agents that spell out how to pass).
+    A script inside a package (``__init__.py`` present) gets its directory.
+    Their SHA-256 becomes the agent's "resolved version".
     """
     argv = shlex.split(agent_cmd)
     if not argv:
@@ -147,8 +172,16 @@ def prepare_agent(agent_cmd: str) -> tuple[list[str], list[tuple[str, str]], dic
             d = os.path.dirname(p)
             if d not in dir_to_mount:
                 dir_to_mount[d] = f"/agent{len(dir_to_mount)}"
-                ro_mounts.append((d, dir_to_mount[d]))
-            new_argv.append(f"{dir_to_mount[d]}/{os.path.basename(p)}")
+                if os.path.exists(os.path.join(d, "__init__.py")):
+                    ro_mounts.append((d, dir_to_mount[d]))
+            mdir = dir_to_mount[d]
+            if (d, mdir) not in ro_mounts:
+                files = [p] + (_python_sibling_imports(p) if p.endswith(".py") else [])
+                for f in files:
+                    pair = (f, f"{mdir}/{os.path.basename(f)}")
+                    if pair not in ro_mounts:
+                        ro_mounts.append(pair)
+            new_argv.append(f"{mdir}/{os.path.basename(p)}")
             files_sha[os.path.basename(p)] = sha256_file(p)
         else:
             new_argv.append(tok)
@@ -156,9 +189,16 @@ def prepare_agent(agent_cmd: str) -> tuple[list[str], list[tuple[str, str]], dic
     return new_argv, ro_mounts, info
 
 
+def _agent_mount_roots(ro_mounts: list[tuple[str, str]]) -> tuple[str, ...]:
+    """/agentN roots of the agent's own mounts (infrastructure, not scope)."""
+    return tuple(sorted({"/" + dst.strip("/").split("/")[0] for _src, dst in ro_mounts}))
+
+
 def _file_bytes(content, subst: dict[str, str]) -> bytes:
+    if isinstance(content, dict) and "json" in content:
+        return (json.dumps(substitute_deep(content["json"], subst), indent=2)
+                + "\n").encode("utf-8")
     if isinstance(content, dict):
-        import base64
         return base64.b64decode(content["base64"])
     return substitute_deep(content, subst).encode("utf-8")
 
@@ -332,7 +372,7 @@ class Engine:
                 result, diff_manifests(before, after),
                 {n: s.requests for n, s in services.services.items()},
                 scenario.canaries,
-                agent_mounts=tuple(dst for _src, dst in ro_mounts),
+                agent_mounts=_agent_mount_roots(ro_mounts),
                 service_ports={n: s.port for n, s in services.services.items()},
                 gate_records=gate.records, gate_port=GATE_PORT,
                 seeded_files=seeded, llm_configured=config.llm is not None,
