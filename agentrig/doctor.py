@@ -131,7 +131,7 @@ def run_doctor() -> DoctorResult:
     else:
         checks.append(Check("report signing (ed25519)", WARN,
                             "cryptography not installed; reports will be unsigned "
-                            "(hash chain still provides tamper-evidence). "
+                            "(the chain is a recomputable digest, not tamper-evidence). "
                             "Install: pip install 'agentrig[signing]'"))
 
     # 7) outbound internet (informational -- explains the exfil model).

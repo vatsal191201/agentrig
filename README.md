@@ -19,6 +19,9 @@ competitor.
 [Full video (26 s, 1080p, with sound)](docs/demo.mp4). Every number on screen comes from a
 real run: the toy agents in `examples/`, DeepSeek through `examples/llm_agent.py`, and
 `agentrig doctor --egress` on the build host. The decoy tokens shown are generated per run.
+The DeepSeek beat (1 of 6 scenarios passed) predates a later check for the DNS scenario's
+decoy token; with it, the same run passes 0 of 6
+([details](docs/incident-pack-results.md#dns_egress_escape)).
 
 ---
 
@@ -326,9 +329,10 @@ host/backend fingerprint (no hostname or paths), per-scenario verdict + evidence
 observed event stream. Tamper-evidence is a **SHA-256 hash chain** over an ordered list of
 records (header, each scenario, each event, summary) where every entry folds in the previous
 digest — so the `head` commits to the whole document. If `cryptography` is installed the head
-is signed with **ed25519**; otherwise the report is emitted unsigned and says so (the chain
-still detects tampering). `agentrig verify` recomputes the chain independently and checks the
-signature.
+is signed with **ed25519**; otherwise the report is emitted unsigned and says so. `agentrig
+verify` recomputes the chain independently and checks the signature. The chain is a public,
+recomputable digest: the signature is what makes tampering detectable. An unsigned report's
+chain detects accidental corruption, not a deliberate edit (see the honesty note below).
 
 Report version 2 (v0.2) adds, per scenario, `stats` (pass rate, Wilson interval,
 pass^k, counts) and `trials[]`. Each trial carries its checks and `phases[]`,
@@ -341,7 +345,11 @@ by construction: each record is a whole object minus only its child list. Versio
 > Honesty note: a report embeds its own public key, so a valid signature proves it was not
 > altered after signing *by whoever holds that private key*. To attribute a report to a
 > specific signer, pin the key fingerprint out of band (`agentrig doctor` prints it). The
-> hash chain stands on its own.
+> hash chain is a public, recomputable digest: with the signature stripped (or on a report
+> that was emitted unsigned) an attacker who can edit the report can recompute the chain,
+> and `agentrig verify` will accept the forgery as "unsigned". The chain alone detects
+> accidental corruption, not tampering. Tamper-evidence comes from the ed25519 signature
+> over the head, or from pinning the head out of band — do that when it matters.
 
 ## Verified on this host
 
@@ -789,11 +797,16 @@ MicroVM and may push more checks to `inconclusive`.
 - The directive vocabulary (`prompt`) remains the protocol for the two demo agents;
   real agents get the natural-language `task`.
 - The signature proves integrity-after-signing, not signer identity, unless you pin the key.
+- The hash chain is a public, recomputable digest: on an unsigned report (or one whose
+  signature was stripped) an attacker who can edit the report can recompute the chain, and
+  `agentrig verify` reports the forgery OK as "unsigned". The chain alone detects accidental
+  corruption, not a deliberate edit; tamper-evidence requires the ed25519 signature over the
+  head, or an out-of-band pinned head.
 
 ## Development
 
 ```bash
-python -m unittest discover -s tests     # 143 tests; integration tests skip if no isolation
+python -m unittest discover -s tests     # 156 tests; the 4 isolation tests skip without isolation
 ```
 
 Small modules, stdlib-only core. See `agentrig/`: `backends/` (the bwrap driver and

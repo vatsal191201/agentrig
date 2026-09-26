@@ -2,14 +2,16 @@
 
 If the ``cryptography`` extra is installed we sign the report's chain head with
 an ed25519 key persisted (0600) under the user state dir -- outside the repo,
-never committed. If it is not installed we say so plainly and rely on the hash
-chain alone for tamper-evidence.
+never committed. If it is not installed we say so plainly and emit an unsigned
+report.
 
 Honesty note: a report embeds its own public key, so a valid signature proves
 the report was not altered *after signing by whoever holds that private key*.
 To attribute it to a specific signer, pin the public key out of band (its
-fingerprint is printed by ``agentrig doctor``). The hash chain stands on its
-own regardless.
+fingerprint is printed by ``agentrig doctor``). The hash chain is a public,
+recomputable digest: without the signature (or an out-of-band pinned head) an
+attacker who can edit the report can rewrite the chain too, so an unsigned
+report's chain is a corruption check, not tamper-evidence.
 """
 
 from __future__ import annotations

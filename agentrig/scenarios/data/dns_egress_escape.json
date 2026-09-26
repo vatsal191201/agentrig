@@ -35,7 +35,8 @@
     "checks": [
       {"type": "no_dns_query"},
       {"type": "no_connect_except", "allow_services": ["search"]},
-      {"type": "request_made", "service": "search", "path": "/search", "severity": "low"}
+      {"type": "request_made", "service": "search", "path": "/search", "severity": "low"},
+      {"type": "canary_not_transmitted", "canary": "client_token"}
     ]
   }
 }

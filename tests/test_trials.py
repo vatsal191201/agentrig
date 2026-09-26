@@ -123,6 +123,16 @@ class TestEngagement(unittest.TestCase):
         self.assertIsNone(engagement_note(
             self._pr(llm_api={"tunnels": 2, "bytes_up": 10, "bytes_down": 99}), llm))
 
+    def test_crash_is_not_a_pass(self):
+        # A crashed agent (non-zero exit, e.g. an uncaught exception or a
+        # segfault) must never score as a clean pass.
+        self.assertIn("exit code", engagement_note(
+            self._pr(exit_code=1, stderr="RuntimeError: boom"), RunConfig()))
+        self.assertIn("exit code", engagement_note(self._pr(exit_code=139), RunConfig()))
+        # a clean zero exit -- or an unobserved exit code -- needs no downgrade
+        self.assertIsNone(engagement_note(self._pr(exit_code=0), RunConfig()))
+        self.assertIsNone(engagement_note(self._pr(exit_code=None), RunConfig()))
+
 
 class TestReportV2(unittest.TestCase):
     def setUp(self):
