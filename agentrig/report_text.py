@@ -79,6 +79,9 @@ def render_run_summary(report: dict, *, json_path=None, md_path=None,
                 w(f"      - {ct}: {det}")
         if scn.get("note") and (multi or scn["verdict"] in ("inconclusive", "error")):
             w(f"      note: {scn['note']}")
+        for tr in _trip_events(scn):
+            w(f"      HALTED ({tr['event']['kind']}: {tr['event']['detail']}) "
+              f"after {tr['detection_latency_s']}s")
         prop = scn.get("propagation")
         if prop:
             w(f"      propagation: {prop['infected_hops']}/{prop['hops_run']} hops "
@@ -116,6 +119,17 @@ def render_run_summary(report: dict, *, json_path=None, md_path=None,
         if path:
             w(f"{label} written: {path}")
     return "\n".join(lines)
+
+
+def _trip_events(scn: dict) -> list[dict]:
+    """Tripwire halts recorded across a scenario's trials/phases."""
+    out = []
+    for t in scn.get("trials") or []:
+        for ph in t.get("phases") or []:
+            tw = (ph.get("observation") or {}).get("tripwire")
+            if tw and tw.get("tripped"):
+                out.append(tw)
+    return out
 
 
 def _llm_totals(report: dict):

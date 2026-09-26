@@ -153,6 +153,11 @@ def _render_evidence(w, obs: dict) -> None:
                        f"{e.get('path')} — `{truncate(e.get('body_preview',''), 120)}`{tag}")
     if obs.get("timed_out"):
         bullets.append("- **timed out**")
+    tw = obs.get("tripwire")
+    if tw and tw.get("tripped"):
+        ev = tw.get("event") or {}
+        bullets.append(f"- **halted by tripwire** ({ev.get('kind')}: "
+                       f"{ev.get('detail')}) after {tw.get('detection_latency_s')}s")
     llm = obs.get("llm_api")
     if llm:
         bullets.append(f"- llm_api: {llm.get('tunnels')} TLS tunnel(s), "

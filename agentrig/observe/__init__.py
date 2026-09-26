@@ -54,6 +54,7 @@ class Observation:
     llm_api: Optional[dict] = None  # None when no LLM endpoint was configured
     gate_port: Optional[int] = None
     dns_port: Optional[int] = None  # set when a DNS sink was in use
+    tripwire: Optional[dict] = None  # runtime halt result, if --halt-on was set
     # (egress event, full request blob) -- in memory only, never serialized, so
     # checks see whole payloads rather than the report's truncated previews.
     raw_egress: list[tuple[dict, bytes]] = field(default_factory=list, repr=False)
@@ -135,6 +136,7 @@ class Observation:
             "egress_requests": self.egress_requests(),
             "egress_receipts": self.egress,
             "dns_queries": self.dns_queries(),
+            "tripwire": self.tripwire,
             "llm_api": self.llm_api,
             "manifest_diff": self.manifest_diff.to_dict() if self.manifest_diff else None,
             "stdout": truncate_middle(self.stdout),

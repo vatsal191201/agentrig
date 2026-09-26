@@ -228,7 +228,8 @@ class LocalBackend(SandboxBackend):
     # -- execution ----------------------------------------------------------
 
     def exec(self, handle: SandboxHandle, argv: list[str], *,
-             stdin: Optional[str] = None, timeout: Optional[float] = None) -> ExecResult:
+             stdin: Optional[str] = None, timeout: Optional[float] = None,
+             tripwire=None) -> ExecResult:
         caps = self.capabilities()
         spec = handle.spec
         limits = spec.limits
@@ -313,6 +314,11 @@ class LocalBackend(SandboxBackend):
             if cfg_fd is not None:
                 os.close(cfg_fd)
 
+        # Runtime tripwire: a watchdog that halts the sandbox the instant a
+        # critical event is observed (opt-in; off by default for scoring).
+        if tripwire is not None:
+            tripwire.arm(trace_path, lambda: self._halt_group(proc), start)
+
         try:
             out, err = proc.communicate(input=stdin, timeout=wall)
             rc = proc.returncode
@@ -325,6 +331,8 @@ class LocalBackend(SandboxBackend):
                 out, err = "", ""
             rc = proc.returncode
         finally:
+            if tripwire is not None:
+                tripwire.disarm()
             stop_poll.set()
             if poller:
                 poller.join(timeout=2)
@@ -435,3 +443,17 @@ class LocalBackend(SandboxBackend):
                 proc.kill()
             except OSError:
                 pass
+
+    def _halt_group(self, proc: subprocess.Popen) -> None:
+        """Halt for the tripwire: SIGTERM first so strace flushes its buffered
+        trace to disk (the post-halt verdict then still sees the event), then
+        SIGKILL to guarantee the stop."""
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except OSError:
+            pass
+        for _ in range(40):
+            if proc.poll() is not None:
+                break
+            time.sleep(0.01)
+        self._kill_group(proc)

@@ -188,8 +188,12 @@ class SandboxBackend(abc.ABC):
         *,
         stdin: Optional[str] = None,
         timeout: Optional[float] = None,
+        tripwire=None,
     ) -> ExecResult:
-        """Run ``argv`` inside the sandbox and collect raw observations."""
+        """Run ``argv`` inside the sandbox and collect raw observations.
+
+        ``tripwire``, if given, is armed for the duration of the run and may
+        halt the sandbox early when a critical event is observed."""
 
     @abc.abstractmethod
     def put_file(
