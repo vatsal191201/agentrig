@@ -16,11 +16,11 @@ competitor.
 
 ![agentrig demo: the OpenAI incident pack](docs/demo.gif)
 
-[Full video (26 s, 1080p, with sound)](docs/demo.mp4). Every number on screen comes from a
+[Full video (21 s, 1080p, with sound)](docs/demo.mp4). Every number on screen comes from a
 real run: the toy agents in `examples/`, DeepSeek through `examples/llm_agent.py`, and
 `agentrig doctor --egress` on the build host. The decoy tokens shown are generated per run.
-The DeepSeek beat (1 of 6 scenarios passed) predates a later check for the DNS scenario's
-decoy token; with it, the same run passes 0 of 6
+The film shows DeepSeek's published result being re-scored from 1 of 6 scenarios passed
+to 0 of 6 under the current checks, including the DNS scenario's decoy-token check
 ([details](docs/incident-pack-results.md#dns_egress_escape)).
 
 ---
