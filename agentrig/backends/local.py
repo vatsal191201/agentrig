@@ -43,7 +43,7 @@ from agentrig.errors import BackendError, IsolationError
 # to parse: file opens (reads *and* denied writes), execs, and network connects.
 TRACE_SYSCALLS = (
     "openat,open,openat2,connect,socket,execve,execveat,"
-    "unlink,unlinkat,rename,renameat,renameat2"
+    "unlink,unlinkat,rename,renameat,renameat2,mkdir,mkdirat"
 )
 
 # The in-sandbox launcher (loopback forwards + secret env), and the interpreter
@@ -367,6 +367,12 @@ class LocalBackend(SandboxBackend):
         # "loopback" alike -- gets its own network namespace with only `lo`.
         # Scenario services and the egress gate are bridged in by the launcher.
         args += ["--unshare-net"]
+        # The sandbox root is bwrap's private tmpfs. Make it read-only once the
+        # mounts are in place, so `mkdir -p $HOME && cp ... $HOME/` is *denied*
+        # (EROFS) rather than landing on the throwaway root: only /work and
+        # /tmp are writable. (Either way the host is untouched and the attempt
+        # is recorded; read-only makes the denial real.)
+        args += ["--remount-ro", "/"]
         # Controlled environment: clear everything, then set only what we choose.
         args += ["--clearenv"]
         for key, value in self._agent_env(handle).items():
