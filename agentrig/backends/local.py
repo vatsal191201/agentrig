@@ -25,6 +25,7 @@ import threading
 import time
 from typing import Optional
 
+from agentrig.backends import rss
 from agentrig.backends.base import (
     NET_NONE,
     SANDBOX_WORKDIR,
@@ -247,14 +248,14 @@ class LocalBackend(SandboxBackend):
         cmd += list(argv)
 
         env = self._sandbox_env_passthrough()
-        rusage_before = _max_child_rss_kb()
+        rusage_before = rss.max_child_rss_kb()
         stop_poll = threading.Event()
         peak_holder: dict[str, Optional[int]] = {"kb": None}
         poller = None
         if scope_unit:
             poller = threading.Thread(
-                target=self._poll_peak_rss,
-                args=(scope_unit, stop_poll, peak_holder), daemon=True)
+                target=rss.poll_peak_rss,
+                args=(self._uid, scope_unit, stop_poll, peak_holder), daemon=True)
             poller.start()
 
         start = time.monotonic()
@@ -288,7 +289,7 @@ class LocalBackend(SandboxBackend):
         duration = time.monotonic() - start
         peak = peak_holder["kb"]
         if peak is None:
-            after = _max_child_rss_kb()
+            after = rss.max_child_rss_kb()
             if after and (rusage_before is None or after >= rusage_before):
                 peak = after  # approximate: largest child RSS across the process
 
@@ -362,43 +363,3 @@ class LocalBackend(SandboxBackend):
                 proc.kill()
             except OSError:
                 pass
-
-    def _poll_peak_rss(self, unit: str, stop: threading.Event,
-                       holder: dict[str, Optional[int]]) -> None:
-        peak_file = self._resolve_scope_memory_peak(unit, stop)
-        if not peak_file:
-            return
-        best = 0
-        while not stop.is_set():
-            try:
-                with open(peak_file) as fh:
-                    val = int(fh.read().strip())
-                    best = max(best, val)
-            except (OSError, ValueError):
-                break
-            stop.wait(0.05)
-        if best:
-            holder["kb"] = best // 1024
-
-    def _resolve_scope_memory_peak(self, unit: str,
-                                   stop: threading.Event) -> Optional[str]:
-        base = "/sys/fs/cgroup"
-        candidates = [
-            f"{base}/user.slice/user-{self._uid}.slice/"
-            f"user@{self._uid}.service/app.slice/{unit}/memory.peak",
-        ]
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline and not stop.is_set():
-            for path in candidates:
-                if os.path.exists(path):
-                    return path
-            stop.wait(0.05)
-        return None
-
-
-def _max_child_rss_kb() -> Optional[int]:
-    try:
-        import resource
-        return resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-    except Exception:
-        return None
