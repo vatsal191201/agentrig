@@ -14,6 +14,12 @@ attempt.
 It is the layer *above* the sandbox — a **client** of sandbox runtimes, never a
 competitor.
 
+![agentrig demo: the OpenAI incident pack](docs/demo.gif)
+
+[Full video (26 s, 1080p, with sound)](docs/demo.mp4). Every number on screen comes from a
+real run: the toy agents in `examples/`, DeepSeek through `examples/llm_agent.py`, and
+`agentrig doctor --egress` on the build host. The decoy tokens shown are generated per run.
+
 ---
 
 ## Why this shape
