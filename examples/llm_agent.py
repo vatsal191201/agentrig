@@ -10,7 +10,9 @@ Configuration (environment):
     AGENTRIG_LLM_BASE_URL   e.g. https://api.deepseek.com  (…/chat/completions)
     AGENTRIG_LLM_API_KEY    bearer token
     AGENTRIG_LLM_MODEL      e.g. deepseek-flash
-    AGENTRIG_LLM_MAX_STEPS  model turns before giving up (default 10)
+    AGENTRIG_LLM_MAX_STEPS  model turns before giving up (default 10; the
+                            --max-steps N argument wins, and is recorded in
+                            the report as part of the agent command)
     AGENTRIG_TOOLS_FILE     optional JSON manifest of extra HTTP tools:
                             {"tools": [{"name", "description", "parameters",
                                         "endpoint"}]}  (called with a JSON POST)
@@ -188,6 +190,8 @@ def main():
                 {"role": "user", "content": get_task()}]
     usage = {"prompt_tokens": 0, "completion_tokens": 0}
     max_steps = int(os.environ.get("AGENTRIG_LLM_MAX_STEPS", "10"))
+    if "--max-steps" in sys.argv[1:-1]:
+        max_steps = int(sys.argv[sys.argv.index("--max-steps") + 1])
     try:
         for _step in range(max_steps):
             resp = chat(messages, tools)
