@@ -1,0 +1,132 @@
+name: agentrig
+description: >-
+  Run an AI agent under attack in a disposable sandbox and get a signed report
+  card, with SARIF for GitHub code scanning and an optional regression gate.
+author: Vatsal Bagri
+branding:
+  icon: shield
+  color: red
+
+inputs:
+  agent:
+    description: Agent command, e.g. "python3 my_agent.py" (paths relative to the workspace).
+    required: true
+  scenario:
+    description: Scenario id(s), a family name, or "all".
+    default: all
+  trials:
+    description: Trials per scenario (rates + Wilson interval when > 1).
+    default: "1"
+  task-field:
+    description: '"task" (natural language, real agents) or "prompt" (demo directives).'
+    default: task
+  llm-base-url:
+    description: OpenAI-compatible https endpoint; the ONLY destination the sandbox may reach.
+    default: ""
+  llm-model:
+    description: Model name handed to the agent.
+    default: ""
+  llm-api-key:
+    description: API key. Pass a secret; it reaches the agent via an fd and is redacted from every output.
+    default: ""
+  timeout:
+    description: Per-scenario wall-clock timeout in seconds.
+    default: "240"
+  report:
+    description: Where to write the JSON report card.
+    default: agentrig-report.json
+  sarif:
+    description: Where to write SARIF (uploaded to code scanning when upload-sarif is true).
+    default: agentrig.sarif
+  upload-sarif:
+    description: Upload the SARIF to GitHub code scanning (needs security-events write).
+    default: "true"
+  baseline:
+    description: Optional baseline report; if set, `agentrig diff` gates on regressions.
+    default: ""
+  tolerance:
+    description: Pass-rate drop tolerated by the regression gate (0.1 = 10 points).
+    default: "0"
+  fail-on-findings:
+    description: Fail the job if any scenario fails.
+    default: "true"
+
+outputs:
+  exit-code:
+    description: agentrig run exit code (0 clean, 3 findings, 2 could not run).
+    value: ${{ steps.run.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - name: Sandbox prerequisites (bubblewrap, strace, user namespaces)
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq bubblewrap strace
+        # Ubuntu 23.10+ restricts unprivileged user namespaces by default.
+        sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+    - name: Install agentrig
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        python3 -m venv "$RUNNER_TEMP/agentrig-venv"
+        "$RUNNER_TEMP/agentrig-venv/bin/pip" install --quiet "$ACTION_PATH[signing]"
+        echo "$RUNNER_TEMP/agentrig-venv/bin" >> "$GITHUB_PATH"
+
+    - name: agentrig doctor
+      shell: bash
+      run: agentrig doctor
+
+    - name: agentrig run
+      id: run
+      shell: bash
+      env:
+        IN_AGENT: ${{ inputs.agent }}
+        IN_SCENARIO: ${{ inputs.scenario }}
+        IN_TRIALS: ${{ inputs.trials }}
+        IN_TASK_FIELD: ${{ inputs.task-field }}
+        IN_TIMEOUT: ${{ inputs.timeout }}
+        IN_REPORT: ${{ inputs.report }}
+        IN_SARIF: ${{ inputs.sarif }}
+        IN_LLM_BASE_URL: ${{ inputs.llm-base-url }}
+        IN_LLM_MODEL: ${{ inputs.llm-model }}
+        AGENTRIG_LLM_API_KEY: ${{ inputs.llm-api-key }}
+      run: |
+        args=(run --agent "$IN_AGENT" --scenario "$IN_SCENARIO" --trials "$IN_TRIALS"
+              --task-field "$IN_TASK_FIELD" --timeout "$IN_TIMEOUT"
+              --json "$IN_REPORT" --sarif "$IN_SARIF")
+        if [ -n "$IN_LLM_BASE_URL" ]; then
+          args+=(--llm-base-url "$IN_LLM_BASE_URL" --llm-model "$IN_LLM_MODEL")
+        fi
+        set +e
+        agentrig "${args[@]}"
+        rc=$?
+        set -e
+        echo "exit-code=$rc" >> "$GITHUB_OUTPUT"
+        if [ "$rc" = 2 ]; then exit 2; fi   # could not run: never report green
+
+    - name: Upload SARIF to code scanning
+      if: always() && inputs.upload-sarif == 'true' && hashFiles(inputs.sarif) != ''
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.sarif }}
+        category: agentrig
+
+    - name: Regression gate (agentrig diff)
+      if: inputs.baseline != ''
+      shell: bash
+      env:
+        IN_BASELINE: ${{ inputs.baseline }}
+        IN_REPORT: ${{ inputs.report }}
+        IN_TOLERANCE: ${{ inputs.tolerance }}
+      run: agentrig diff "$IN_BASELINE" "$IN_REPORT" --tolerance "$IN_TOLERANCE"
+
+    - name: Fail on findings
+      if: inputs.fail-on-findings == 'true' && steps.run.outputs.exit-code == '3'
+      shell: bash
+      run: |
+        echo "agentrig found failing scenarios (see the report and code scanning)"
+        exit 3
