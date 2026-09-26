@@ -27,17 +27,23 @@ import time
 from typing import Callable, Optional
 
 from agentrig.observe.matching import reveals
+from agentrig.observe.actions import command_match, is_file_read, under_path
+from agentrig.observe.strace_parse import parse_lines
 
 
 class Tripwire:
     def __init__(self, *, canaries: Optional[dict[str, str]] = None,
                  read_paths: Optional[list[str]] = None,
                  command_patterns: Optional[list[str]] = None,
+                 command_line_patterns: Optional[list[str]] = None,
+                 snapshot_root: Optional[str] = None,
                  gate=None, services: Optional[dict] = None, dns_sink=None,
                  watch_dns: bool = False) -> None:
         self._canaries = {n: v.encode("utf-8") for n, v in (canaries or {}).items() if v}
         self._read_paths = [p for p in (read_paths or []) if p]
         self._cmd_res = [re.compile(p) for p in (command_patterns or [])]
+        self._cmdline_res = [re.compile(p) for p in (command_line_patterns or [])]
+        self._snapshot_root = snapshot_root
         self._gate = gate
         self._services = services or {}
         self._dns = dns_sink
@@ -47,6 +53,8 @@ class Tripwire:
         self._svc_i: dict[str, int] = {}
         self._dns_i = 0
         self._trace_off = 0
+        self._trace_fragment = ""
+        self._trace_pending: dict[str, str] = {}
         self._trace_path: Optional[str] = None
         self._kill: Optional[Callable[[], None]] = None
         self._start = 0.0
@@ -135,7 +143,8 @@ class Tripwire:
         return None
 
     def _poll_trace(self) -> Optional[dict]:
-        if not self._trace_path or not (self._read_paths or self._cmd_res):
+        if not self._trace_path or not (self._read_paths or self._cmd_res
+                                        or self._cmdline_res):
             return None
         try:
             with open(self._trace_path, errors="replace") as fh:
@@ -144,15 +153,29 @@ class Tripwire:
                 self._trace_off = fh.tell()
         except OSError:
             return None
-        for line in chunk.splitlines():
-            if ("openat(" in line or "open(" in line) and "= -" not in line:
+        lines = (self._trace_fragment + chunk).split("\n")
+        self._trace_fragment = lines.pop()
+        for event in parse_lines(lines, snapshot_root=self._snapshot_root,
+                                 pending=self._trace_pending):
+            if is_file_read(event):
                 for p in self._read_paths:
-                    if f'"{p}' in line or f'/{p.strip("/")}' in line:
+                    if under_path(event["path"], p):
                         return {"kind": "forbidden_read",
-                                "detail": f"opened forbidden path matching {p!r}"}
-            if "execve(" in line and "= 0" in line:
+                                "path": event["path"],
+                                "detail": f"opened forbidden file {event['path']!r}"}
+            if event["type"] == "process_spawn":
                 for rx in self._cmd_res:
-                    if rx.search(line):
+                    matched = command_match(event, rx)
+                    if matched:
                         return {"kind": "forbidden_command",
+                                "path": event["path"], "argv": event["argv"],
+                                "matched": matched,
+                                "detail": f"ran forbidden executable {matched!r}"}
+                # no_command_matching has a separate, argument-aware contract
+                # (for example rm -rf); preserve it for that check's tripwire.
+                for rx in self._cmdline_res:
+                    if rx.search(" ".join(event["argv"])):
+                        return {"kind": "forbidden_command",
+                                "path": event["path"], "argv": event["argv"],
                                 "detail": f"ran a command matching {rx.pattern!r}"}
         return None

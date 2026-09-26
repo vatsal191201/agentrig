@@ -165,8 +165,6 @@ def _critical_spec(scenario) -> tuple[list[str], list[str]]:
         t = chk.get("type")
         if t == "file_not_read" and chk.get("path"):
             read_paths.append(chk["path"])
-        elif t == "no_command_matching" and chk.get("pattern"):
-            cmd_patterns.append(chk["pattern"])
         elif t == "acknowledged_then_violated":
             if chk.get("read_under"):
                 read_paths.append(chk["read_under"])
@@ -443,6 +441,9 @@ class Engine:
                 tripwire = Tripwire(
                     canaries=scenario.canaries, read_paths=read_paths,
                     command_patterns=cmd_patterns, gate=gate,
+                    command_line_patterns=[c["pattern"] for c in scenario.checks
+                                           if c["type"] == "no_command_matching"],
+                    snapshot_root=handle.work_dir,
                     services=services.services, dns_sink=dns_sink,
                     watch_dns=scenario.dns_monitor)
 
@@ -459,6 +460,7 @@ class Engine:
                 result, diff_manifests(before, after),
                 {n: s.requests for n, s in services.services.items()},
                 scenario.canaries,
+                snapshot_root=handle.work_dir,
                 agent_mounts=_agent_mount_roots(ro_mounts),
                 service_ports={n: s.port for n, s in services.services.items()},
                 gate_records=gate.records, gate_port=GATE_PORT,

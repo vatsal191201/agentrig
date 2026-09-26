@@ -25,6 +25,8 @@ import os
 import re
 from typing import Optional
 
+from agentrig.observe.actions import snapshot_directory
+
 # Only *scratch/runtime* write targets are noise. A write attempt to /etc,
 # /usr, /home, /root, ... is a scope escape or persistence attempt and MUST be
 # recorded even though the read-only sandbox denies it. (Reads are filtered
@@ -125,9 +127,10 @@ def _pid_of(line: str) -> Optional[str]:
     return m.group(1) or m.group(2)
 
 
-def _stitch(lines: list[str]) -> list[str]:
+def _stitch(lines: list[str], pending: Optional[dict[str, str]] = None) -> list[str]:
     """Rejoin strace's <unfinished ...> / <... resumed> line pairs per-pid."""
-    pending: dict[str, str] = {}
+    if pending is None:
+        pending = {}
     out: list[str] = []
     for raw in lines:
         line = raw.rstrip("\n")
@@ -145,7 +148,8 @@ def _stitch(lines: list[str]) -> list[str]:
 
 
 def parse_trace(trace_path: str, *, workdir: str = "/work",
-                extra_noise_write_roots: tuple[str, ...] = ()) -> list[dict]:
+                extra_noise_write_roots: tuple[str, ...] = (),
+                snapshot_root: Optional[str] = None) -> list[dict]:
     """Parse a strace log file into a list of normalized event dicts."""
     try:
         with open(trace_path, errors="replace") as fh:
@@ -153,15 +157,18 @@ def parse_trace(trace_path: str, *, workdir: str = "/work",
     except OSError:
         return []
     return parse_lines(lines, workdir=workdir,
-                       extra_noise_write_roots=extra_noise_write_roots)
+                       extra_noise_write_roots=extra_noise_write_roots,
+                       snapshot_root=snapshot_root)
 
 
 def parse_lines(lines: list[str], *, workdir: str = "/work",
-                extra_noise_write_roots: tuple[str, ...] = ()) -> list[dict]:
+                extra_noise_write_roots: tuple[str, ...] = (),
+                snapshot_root: Optional[str] = None,
+                pending: Optional[dict[str, str]] = None) -> list[dict]:
     # The agent-under-test's own mount dirs are infrastructure, not scenario
     # scope: a denied bytecode-cache write there is not a scope escape.
     noise = _NOISE_WRITE_ROOTS + tuple(extra_noise_write_roots)
-    bodies = _stitch(lines)
+    bodies = _stitch(lines, pending)
     setup_end = _setup_end(bodies)
     events: list[dict] = []
     for i, body in enumerate(bodies):
@@ -170,6 +177,10 @@ def parse_lines(lines: list[str], *, workdir: str = "/work",
             continue
         if i < setup_end and ev["type"] != "process_spawn":
             continue  # bwrap building the sandbox (mount points under /newroot)
+        if ev["type"] == "file_read" and "is_directory" not in ev:
+            directory = snapshot_directory(ev["path"], snapshot_root, workdir)
+            if directory is not None:
+                ev["is_directory"] = directory
         events.append(ev)
     return events
 
@@ -280,11 +291,15 @@ def _open_event(m: re.Match, workdir: str,
     path = resolved if resolved else _resolve(path_arg, dirfd, workdir)
     write_intent = any(f in flags for f in ("O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC"))
 
-    if not write_intent:
+    if not write_intent or "O_RDWR" in flags:
         # a read
         if ret >= 0 and _under(path, (workdir,)):
-            return {"type": "file_read", "path": path}
-        return None
+            ev = {"type": "file_read", "path": path, "open_flags": flags}
+            if "O_DIRECTORY" in flags:
+                ev["is_directory"] = True
+            return ev
+        if not write_intent:
+            return None
 
     # a write-intent open. Inside workdir -> manifest owns it. Scratch -> drop.
     if _under(path, (workdir,)) or _under(path, noise_write_roots):

@@ -11,7 +11,16 @@ class TestStraceParse(unittest.TestCase):
         ev = self.parse([
             '111 openat(AT_FDCWD</work>, "/work/.env", O_RDONLY|O_CLOEXEC) = 3</work/.env>',
         ])
-        self.assertEqual(ev, [{"type": "file_read", "path": "/work/.env"}])
+        self.assertEqual(ev, [{"type": "file_read", "path": "/work/.env",
+                               "open_flags": "O_RDONLY|O_CLOEXEC"}])
+
+    def test_read_write_open_is_also_a_read(self):
+        ev = self.parse(['openat(AT_FDCWD</work>, "solution.md", O_RDWR) = 3'])
+        self.assertEqual(ev[0]["type"], "file_read")
+
+    def test_failed_open_is_not_a_read(self):
+        self.assertEqual(self.parse([
+            'openat(AT_FDCWD</work>, "solution.md", O_RDONLY) = -1 EACCES']), [])
 
     def test_relative_read_resolved_via_dirfd(self):
         ev = self.parse([

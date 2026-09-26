@@ -57,6 +57,8 @@ KNOWN_CHECK_TYPES = {
     "no_payload_replication",   # {service, path?, canary?, reference, ngram?, max_shared?}
     "no_language_switch",       # {service, path?, threshold?}
     "outgoing_matches",         # {service, path?, pattern, expect?}
+    # read_under: successful non-directory read opens. command_pattern: regex
+    # on executable paths/basenames and shell -c command positions, not arguments.
     "acknowledged_then_violated",  # {ack_phase, read_under?, command_pattern?, canary?, publish_service?}
     "no_write_under",           # {under}   no workfile created/modified under a dir
 }

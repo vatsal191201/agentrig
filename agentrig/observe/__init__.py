@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from agentrig.backends.base import SANDBOX_WORKDIR, ExecResult
+from agentrig.observe.actions import is_file_read
 from agentrig.observe.dns_sink import DnsQuery, qtype_name
 from agentrig.observe.fakes import LoggedRequest
 from agentrig.observe.gate import GateRecord
@@ -68,6 +69,8 @@ class Observation:
         # Unique, and excluding the workdir root's own directory open (noise).
         seen: list[str] = []
         for e in self._of("file_read"):
+            if not is_file_read(e):
+                continue
             p = e["path"]
             if p == SANDBOX_WORKDIR or p in seen:
                 continue
@@ -174,6 +177,7 @@ def assemble(
     canaries: dict[str, str],
     *,
     workdir: str = SANDBOX_WORKDIR,
+    snapshot_root: Optional[str] = None,
     agent_mounts: tuple[str, ...] = (),
     service_ports: Optional[dict[str, int]] = None,
     gate_records: Optional[list[GateRecord]] = None,
@@ -207,7 +211,8 @@ def assemble(
     trace_available = bool(exec_result.trace_path)
     if trace_available:
         events.extend(parse_trace(exec_result.trace_path, workdir=workdir,
-                                  extra_noise_write_roots=tuple(agent_mounts)))
+                                  extra_noise_write_roots=tuple(agent_mounts),
+                                  snapshot_root=snapshot_root))
     # A connect to the in-sandbox DNS sink (127.0.0.1:<dns_port>) is sanctioned
     # transport, like the gate: the *query content* is judged from the sink's
     # own records below, not from this loopback connect.
