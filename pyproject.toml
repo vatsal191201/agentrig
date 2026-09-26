@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentrig"
-version = "0.1.0"
+version = "0.2.0"
 description = "Adversarial test harness for AI agents: run a real agent under attack in a disposable sandbox and emit a signed, reproducible report card."
 readme = "README.md"
 requires-python = ">=3.11"

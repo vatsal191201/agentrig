@@ -1,19 +1,23 @@
 """agentrig command-line interface.
 
-    agentrig run  --agent <cmd> --scenario <id|all> [--backend local] [--json f]
+    agentrig run  --agent <cmd> --scenario <id|all> [--trials N] [--json f]
+                  [--task-field prompt|task] [--llm-base-url URL --llm-model M]
     agentrig list-scenarios
     agentrig report <run.json> [--md]
     agentrig verify <run.json>
+    agentrig diff <old.json> <new.json> [--tolerance 0.1]
     agentrig doctor
 
 Exit codes for `run`: 0 = no failures, 3 = at least one scenario FAILED,
-2 = could not run (isolation/harness error).
+2 = could not run (isolation/harness error). `verify`: 1 = verification failed.
+`diff`: 4 = regression, 1 = a report failed verification.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Optional
 
@@ -21,15 +25,52 @@ from agentrig import __version__, doctor as doctor_mod
 from agentrig import scenarios as scenario_mod
 from agentrig.backends import available_backends, get_backend
 from agentrig.backends.base import Limits
-from agentrig.engine import Engine
+from agentrig.diff import diff_reports, render_diff
+from agentrig.engine import Engine, LLMConfig, RunConfig
 from agentrig.errors import AgentrigError, IsolationError
 from agentrig.report import build_report, verify_report
 from agentrig.report_md import render_markdown
+from agentrig.report_text import render_run_summary
 
 EXIT_OK = 0
 EXIT_VERIFY_FAILED = 1
 EXIT_CANNOT_RUN = 2
 EXIT_FINDINGS = 3
+EXIT_REGRESSION = 4
+
+
+def _read_env_file(path: str, name: str) -> Optional[str]:
+    """Read one NAME=value from a dotenv file (value never printed)."""
+    try:
+        with open(os.path.expanduser(path), encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("export "):
+                    line = line[7:].lstrip()
+                key, sep, value = line.partition("=")
+                if sep and key.strip() == name:
+                    value = value.strip()
+                    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                        value = value[1:-1]
+                    return value
+    except OSError as exc:
+        raise AgentrigError(f"cannot read --env-file: {exc}") from None
+    return None
+
+
+def _llm_config(args: argparse.Namespace) -> Optional[LLMConfig]:
+    if not args.llm_base_url:
+        return None
+    if not args.llm_model:
+        raise AgentrigError("--llm-model is required with --llm-base-url")
+    key = os.environ.get(args.llm_api_key_env)
+    if not key and args.env_file:
+        key = _read_env_file(args.env_file, args.llm_api_key_env)
+    if not key:
+        raise AgentrigError(
+            f"no API key: set ${args.llm_api_key_env} (or pass --env-file); "
+            "the key is handed to the agent via an fd and never written out")
+    return LLMConfig(base_url=args.llm_base_url, model=args.llm_model, api_key=key)
 
 
 def _select_scenarios(spec: str, extra_dir: Optional[str]) -> list:
@@ -58,19 +99,24 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_CANNOT_RUN
 
+    if args.trials < 1:
+        print("error: --trials must be >= 1", file=sys.stderr)
+        return EXIT_CANNOT_RUN
     engine = Engine(backend)
     limits = Limits(memory_mb=args.memory_mb, cpu_quota_percent=args.cpu_quota,
                     pids_max=args.pids_max, wall_timeout_s=args.timeout)
+    config = RunConfig(trials=args.trials, task_field=args.task_field,
+                       llm=_llm_config(args), trace=not args.no_trace, limits=limits)
     try:
-        outcomes, agent_info = engine.run(scns, args.agent, limits=limits,
-                                          trace=not args.no_trace)
+        outcomes, agent_info = engine.run(scns, args.agent, config=config)
     except IsolationError as exc:
         print(f"error: {exc}", file=sys.stderr)
         print("Run `agentrig doctor` for remedies. Refusing to run unsandboxed.",
               file=sys.stderr)
         return EXIT_CANNOT_RUN
 
-    report = build_report(outcomes, agent_info, backend.capabilities())
+    report = build_report(outcomes, agent_info, backend.capabilities(),
+                          run_config=config.to_dict(), scrubber=config.scrubber())
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
@@ -78,48 +124,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.md:
         with open(args.md, "w", encoding="utf-8") as fh:
             fh.write(render_markdown(report))
+    if getattr(args, "sarif", None):
+        from agentrig.sarif import to_sarif
+        with open(args.sarif, "w", encoding="utf-8") as fh:
+            json.dump(to_sarif(report), fh, indent=2)
 
-    _print_run_summary(report, args)
+    print(render_run_summary(report, json_path=args.json, md_path=args.md,
+                             sarif_path=getattr(args, "sarif", None)))
 
     s = report["summary"]
     if s.get("fail", 0):
         return EXIT_FINDINGS
     return EXIT_OK
-
-
-def _print_run_summary(report: dict, args: argparse.Namespace) -> None:
-    print(f"agentrig {report['agentrig_version']}  run {report['run_id']}")
-    print(f"agent: {report['agent']['command']}")
-    caps = report["backend"]["capabilities"]
-    enforcing = [k for k in ("filesystem_isolation", "network_isolation",
-                             "memory_limit", "cpu_limit", "pids_limit",
-                             "syscall_observation") if caps.get(k)]
-    print(f"backend: {report['backend']['name']} (enforcing: "
-          f"{', '.join(enforcing) or 'nothing'})")
-    print("-" * 64)
-    for scn in report["scenarios"]:
-        print(f"  {scn['verdict'].upper():13} {scn['scenario_id']:26} "
-              f"{scn['category']}/{scn['severity']}")
-        for c in scn["checks"]:
-            if c["verdict"] != "pass":
-                print(f"      - {c['type']}: {c['verdict']} — {c['detail']}")
-        if scn.get("error"):
-            print(f"      ! harness error: {scn['error']}")
-    print("-" * 64)
-    s = report["summary"]
-    print(f"summary: {s.get('pass',0)} pass, {s.get('fail',0)} fail, "
-          f"{s.get('inconclusive',0)} inconclusive, {s.get('error',0)} error "
-          f"(of {s.get('total',0)})")
-    sig = report["signature"]
-    if sig.get("signed"):
-        print(f"signed: ed25519 fingerprint {sig['fingerprint']}; "
-              f"chain head {report['chain']['head'][:16]}…")
-    else:
-        print(f"unsigned (hash chain head {report['chain']['head'][:16]}…)")
-    if args.json:
-        print(f"report written: {args.json}")
-    if args.md:
-        print(f"markdown written: {args.md}")
 
 
 def cmd_list(args: argparse.Namespace) -> int:
@@ -144,8 +160,30 @@ def cmd_report(args: argparse.Namespace) -> int:
     if args.md:
         print(render_markdown(report))
     else:
-        _print_run_summary(report, argparse.Namespace(json=None, md=None))
+        print(render_run_summary(report))
     return EXIT_OK
+
+
+def cmd_diff(args: argparse.Namespace) -> int:
+    reports = []
+    for path in (args.old, args.new):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                reports.append(json.load(fh))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"error: cannot read report {path}: {exc}", file=sys.stderr)
+            return EXIT_CANNOT_RUN
+    if not args.no_verify:
+        for path, rep in zip((args.old, args.new), reports):
+            v = verify_report(rep)
+            if not v.ok:
+                print(f"error: {path} failed verification "
+                      f"({'; '.join(v.problems)}); refusing to diff "
+                      f"(--no-verify to override)", file=sys.stderr)
+                return EXIT_VERIFY_FAILED
+    d = diff_reports(reports[0], reports[1], tolerance=args.tolerance)
+    print(json.dumps(d, indent=2) if args.json else render_diff(d))
+    return EXIT_REGRESSION if d["regressed"] else EXIT_OK
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
@@ -205,6 +243,28 @@ def build_parser() -> argparse.ArgumentParser:
                         "INCONCLUSIVE -- simulates a backend without tracing)")
     r.add_argument("--scenarios-dir", dest="scenarios_dir",
                    help="extra directory of scenario JSON files")
+    r.add_argument("--trials", type=int, default=1,
+                   help="run each scenario N times, each in a fresh sandbox; "
+                        "reports pass rate, pass^N and a Wilson 95%% interval")
+    r.add_argument("--task-field", choices=("prompt", "task"), default="prompt",
+                   dest="task_field",
+                   help="what the agent is handed: 'prompt' = directive "
+                        "vocabulary (demo agents), 'task' = natural language "
+                        "(real LLM agents)")
+    r.add_argument("--llm-base-url", dest="llm_base_url",
+                   help="OpenAI-compatible https endpoint: the ONLY external "
+                        "destination the sandbox may reach (recorded as llm_api)")
+    r.add_argument("--llm-model", dest="llm_model", help="model name for the agent")
+    r.add_argument("--llm-api-key-env", dest="llm_api_key_env",
+                   default="AGENTRIG_LLM_API_KEY",
+                   help="name of the env var holding the API key (default "
+                        "AGENTRIG_LLM_API_KEY); passed to the agent via an fd "
+                        "and scrubbed from every output")
+    r.add_argument("--env-file", dest="env_file",
+                   help="dotenv file to read the API key variable from if it "
+                        "is not in the environment")
+    r.add_argument("--sarif", metavar="FILE",
+                   help="write SARIF 2.1.0 (GitHub code scanning)")
     r.set_defaults(func=cmd_run)
 
     ls = sub.add_parser("list-scenarios", help="list available scenarios")
@@ -221,6 +281,17 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("report", help="path to a run.json report")
     v.add_argument("--json", action="store_true")
     v.set_defaults(func=cmd_verify)
+
+    df = sub.add_parser("diff", help="regression view between two reports")
+    df.add_argument("old", help="baseline report JSON")
+    df.add_argument("new", help="candidate report JSON")
+    df.add_argument("--tolerance", type=float, default=0.0,
+                    help="allowed pass-rate drop before it counts as a "
+                         "regression (0.1 = 10 points; default 0)")
+    df.add_argument("--no-verify", action="store_true", dest="no_verify",
+                    help="diff even if a report fails verification")
+    df.add_argument("--json", action="store_true")
+    df.set_defaults(func=cmd_diff)
 
     d = sub.add_parser("doctor", help="probe host isolation capabilities")
     d.add_argument("--json", action="store_true")

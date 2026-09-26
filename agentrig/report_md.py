@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agentrig.report_text import failing_checks, rate_str
 from agentrig.util import truncate
 
 _SYMBOL = {"pass": "PASS", "fail": "FAIL", "inconclusive": "INCONC", "error": "ERROR"}
@@ -33,6 +34,14 @@ def render_markdown(report: dict) -> str:
                       "cpu_limit", "pids_limit", "syscall_observation") if caps.get(k)]
     w(f"- **Backend**: `{backend.get('name')}` — enforcing: "
       f"{', '.join(on) if on else 'nothing'}  ")
+    cfg = report.get("run_config") or {}
+    if cfg:
+        llm = cfg.get("llm")
+        w(f"- **Trials per scenario**: {cfg.get('trials', 1)}; task field: "
+          f"`{cfg.get('task_field', 'prompt')}`  ")
+        if llm:
+            w(f"- **LLM**: `{llm.get('model')}` — the only egress allowed out of "
+              f"the sandbox: `{llm.get('allowed_endpoint')}` (API key redacted)  ")
     w("")
 
     s = report.get("summary", {})
@@ -44,12 +53,20 @@ def render_markdown(report: dict) -> str:
       f"| {s.get('error',0)} | {s.get('total',0)} |")
     w("")
 
-    w("| scenario | category | severity | verdict |")
-    w("|---|---|---|---|")
+    w("| scenario | category | severity | verdict | pass rate (95% CI) |")
+    w("|---|---|---|---|---|")
     for scn in report.get("scenarios", []):
+        st = scn.get("stats") or {}
         w(f"| {scn.get('scenario_id')} | {scn.get('category')} "
-          f"| {scn.get('severity')} | {_verdict_tag(scn.get('verdict',''))} |")
+          f"| {scn.get('severity')} | {_verdict_tag(scn.get('verdict',''))} "
+          f"| {rate_str(st.get('pass_rate')) if st else '—'} |")
     w("")
+    for fam in report.get("families") or []:
+        w(f"**Family `{fam['family']}`** — catch rate "
+          f"{rate_str(fam['catch_rate'])}; false-stop rate "
+          f"{rate_str(fam['false_stop_rate'])}.  ")
+    if report.get("families"):
+        w("")
 
     w("## Scenarios")
     for scn in report.get("scenarios", []):
@@ -67,13 +84,31 @@ def render_markdown(report: dict) -> str:
         if scn.get("error"):
             w(f"**Harness error:** {scn['error']}")
             w("")
+        if scn.get("note"):
+            w(f"*{scn['note']}*")
+            w("")
         w("| check | verdict | detail |")
         w("|---|---|---|")
         for c in scn.get("checks", []):
             detail = c.get("detail", "").replace("|", "\\|")
             w(f"| `{c.get('type')}` | {_verdict_tag(c.get('verdict',''))} | {detail} |")
         w("")
-        _render_evidence(w, scn.get("observation") or {})
+        trials = scn.get("trials") or []
+        if len(trials) > 1:
+            counts = [f"`{ct}` failed in {n}/{tot} trials"
+                      for ct, n, tot, _d in failing_checks(scn) if n]
+            if counts:
+                w("Across trials: " + "; ".join(counts) + ".")
+                w("")
+        rep = (scn.get("stats") or {}).get("representative_trial", 1)
+        rep_trial = trials[rep - 1] if 0 < rep <= len(trials) else None
+        phases = (rep_trial or {}).get("phases") or [
+            {"phase": "main", "observation": scn.get("observation") or {}}]
+        for ph in phases:
+            if len(phases) > 1:
+                w(f"*Phase `{ph.get('phase')}` (trial {rep}):*")
+                w("")
+            _render_evidence(w, ph.get("observation") or {})
 
     w("")
     w("## Integrity")
@@ -118,6 +153,24 @@ def _render_evidence(w, obs: dict) -> None:
                        f"{e.get('path')} — `{truncate(e.get('body_preview',''), 120)}`{tag}")
     if obs.get("timed_out"):
         bullets.append("- **timed out**")
+    llm = obs.get("llm_api")
+    if llm:
+        bullets.append(f"- llm_api: {llm.get('tunnels')} TLS tunnel(s), "
+                       f"{llm.get('bytes_up')} B up / {llm.get('bytes_down')} B down")
+    for r in obs.get("egress_receipts") or []:
+        if r.get("kind") == "llm_api":
+            continue
+        files = ", ".join(f"`{m['file']}` ({m['how']})"
+                          for m in r.get("matched_seeded_files") or [])
+        sha = (r.get("payload_sha256") or "")[:12]
+        bullets.append(
+            f"- receipt: {'ALLOWED' if r.get('allowed') else 'BLOCKED'} "
+            f"{r.get('method')} → {r.get('destination')}"
+            f"{' ' + r['path'] if r.get('path') else ''}"
+            f" — {r.get('bytes_out')} B"
+            + (f", sha256 `{sha}…`" if sha else "")
+            + (f", carried {files}" if files else "")
+            + f" — {r.get('outcome')}")
     if bullets:
         w("**Observed side effects:**")
         w("")

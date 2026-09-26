@@ -11,6 +11,14 @@ says so.
 compares it to the stored chain and head, then checks the signature. Flipping a
 single byte anywhere in the chained content changes the recomputed head and the
 verification fails.
+
+Report version 2 (v0.2) adds trials and phases. Its chain covers *every* field
+by construction -- each record is a whole dict minus only its child list --
+so a field added later can never silently fall outside the chain. Version 1
+reports keep their original record layout and still verify.
+
+Before chaining, the whole report is passed through the run's secret scrubber:
+the LLM API key cannot be signed into a report, whatever path it took.
 """
 
 from __future__ import annotations
@@ -22,13 +30,16 @@ from typing import Optional
 
 from agentrig import __version__
 from agentrig.backends.base import Capabilities
-from agentrig.engine import ScenarioOutcome
+from agentrig.engine import ScenarioOutcome, TrialOutcome
 from agentrig.signing import Signer, crypto_available, verify_signature
+from agentrig.stats import rate
 from agentrig.util import canonical_json, canonical_sha256, new_run_id, utc_now_iso
-from agentrig.verdict import ERROR, FAIL, INCONCLUSIVE, PASS
+from agentrig.verdict import ERROR, FAIL, INCONCLUSIVE, PASS, trial_aborted
 
-REPORT_VERSION = 1
+REPORT_VERSION = 2
 GENESIS = "0" * 64
+# Keys that are structure (child lists) or chain output, not chained content.
+_V2_STRUCTURAL = ("scenarios", "families", "summary", "chain", "signature")
 
 
 # ---------------------------------------------------------------------------
@@ -39,6 +50,38 @@ GENESIS = "0" * 64
 def _chain_records(report: dict) -> list[dict]:
     """Deterministic ordered records the chain covers. Used by build AND verify
     so both sides agree byte-for-byte."""
+    if isinstance(report.get("report_version"), int) and report["report_version"] >= 2:
+        return _chain_records_v2(report)
+    return _chain_records_v1(report)
+
+
+def _without(d: dict, *keys: str) -> dict:
+    return {k: v for k, v in d.items() if k not in keys}
+
+
+def _chain_records_v2(report: dict) -> list[dict]:
+    records: list[dict] = [{"kind": "header",
+                            "header": _without(report, *_V2_STRUCTURAL)}]
+    for s in report.get("scenarios", []):
+        sid = s.get("scenario_id")
+        records.append({"kind": "scenario", "scenario": _without(s, "trials")})
+        for t in s.get("trials", []):
+            records.append({"kind": "trial", "scenario_id": sid,
+                            "trial": _without(t, "phases")})
+            for ph in t.get("phases", []):
+                records.append({"kind": "phase", "scenario_id": sid,
+                                "trial_index": t.get("trial"),
+                                "phase": _without(ph, "events")})
+                for ev in ph.get("events", []):
+                    records.append({"kind": "event", "scenario_id": sid,
+                                    "trial_index": t.get("trial"),
+                                    "phase_id": ph.get("phase"), "event": ev})
+    records.append({"kind": "families", "families": report.get("families")})
+    records.append({"kind": "summary", "summary": report.get("summary")})
+    return records
+
+
+def _chain_records_v1(report: dict) -> list[dict]:
     records: list[dict] = [{
         "kind": "header",
         "agentrig_version": report.get("agentrig_version"),
@@ -96,8 +139,34 @@ def _host_fingerprint() -> dict:
     }
 
 
+def _trials_of(outcome: ScenarioOutcome) -> list[TrialOutcome]:
+    """Trials of an outcome; a hand-built single-run outcome counts as one."""
+    if outcome.trials:
+        return outcome.trials
+    from agentrig.engine import PhaseRun
+    return [TrialOutcome(1, outcome.verdict,
+                         [PhaseRun("main", outcome.observation, outcome.spec_summary)],
+                         error=outcome.error)]
+
+
+def _trial_dict(t: TrialOutcome) -> dict:
+    d = {"trial": t.index, "verdict": t.verdict.verdict, "note": t.verdict.note,
+         "checks": [c.to_dict() for c in t.verdict.checks],
+         "phases": [{"phase": ph.phase_id,
+                     "observation": ph.observation.summary() if ph.observation else None,
+                     "events": ph.observation.events if ph.observation else []}
+                    for ph in t.phases]}
+    if t.error:
+        d["error"] = t.error
+    return d
+
+
 def _scenario_dict(outcome: ScenarioOutcome) -> dict:
     scn = outcome.scenario
+    trials = _trials_of(outcome)
+    stats = outcome.stats or {
+        "trials": 1, "pass_rate": rate(int(outcome.verdict.verdict == PASS), 1),
+        "representative_trial": 1}
     d = {
         "scenario_id": scn.id,
         "title": scn.title,
@@ -108,10 +177,16 @@ def _scenario_dict(outcome: ScenarioOutcome) -> dict:
         "verdict": outcome.verdict.verdict,
         "safe_behavior": outcome.verdict.safe_behavior,
         "note": outcome.verdict.note,
+        "stats": stats,
+        # Representative trial (see stats.representative_trial), first phase:
+        # the v1-shaped view. trials[] below is the complete record.
         "checks": [c.to_dict() for c in outcome.verdict.checks],
         "observation": outcome.observation.summary() if outcome.observation else None,
         "events": outcome.observation.events if outcome.observation else [],
+        "trials": [_trial_dict(t) for t in trials],
     }
+    if scn.family:
+        d.update(family=scn.family, variant=scn.variant, perturbed=scn.perturbed)
     if outcome.error:
         d["error"] = outcome.error
     return d
@@ -122,13 +197,50 @@ def _summary(outcomes: list[ScenarioOutcome]) -> dict:
     for o in outcomes:
         counts[o.verdict.verdict] = counts.get(o.verdict.verdict, 0) + 1
     counts["total"] = len(outcomes)
+    counts["trials_total"] = sum(len(_trials_of(o)) for o in outcomes)
     return counts
+
+
+def _families(outcomes: list[ScenarioOutcome]) -> list[dict]:
+    """Catch rate (perturbed -> aborted) and false-stop rate (control ->
+    aborted) for each scenario family, over every trial of every variant."""
+    fams: dict[str, dict] = {}
+    for o in outcomes:
+        scn = o.scenario
+        if not scn.family:
+            continue
+        f = fams.setdefault(scn.family, {"perturbed": [0, 0], "control": [0, 0],
+                                         "undetermined": 0, "variants": []})
+        f["variants"].append(scn.variant)
+        bucket = f["perturbed" if scn.perturbed else "control"]
+        for t in _trials_of(o):
+            aborted = trial_aborted(t, scn.abort_signal)
+            if aborted is None:
+                f["undetermined"] += 1
+                continue
+            bucket[0] += int(aborted)
+            bucket[1] += 1
+    out = []
+    for name, f in sorted(fams.items()):
+        out.append({
+            "family": name,
+            "variants": f["variants"],
+            "catch_rate": rate(*f["perturbed"]),
+            "false_stop_rate": rate(*f["control"]),
+            "undetermined_trials": f["undetermined"],
+            "definition": "catch = a perturbed variant's trial aborted (never "
+                          "triggered the abort signal's request); false stop = a "
+                          "control variant's trial aborted",
+        })
+    return out
 
 
 def build_report(outcomes: list[ScenarioOutcome], agent_info: dict,
                  capabilities: Capabilities, *,
-                 signer: Optional[Signer] = None) -> dict:
-    """Assemble the full report dict, compute the chain, and sign it."""
+                 signer: Optional[Signer] = None,
+                 run_config: Optional[dict] = None,
+                 scrubber=None) -> dict:
+    """Assemble the full report dict, scrub it, compute the chain, sign it."""
     report: dict = {
         "agentrig_version": __version__,
         "report_version": REPORT_VERSION,
@@ -138,9 +250,13 @@ def build_report(outcomes: list[ScenarioOutcome], agent_info: dict,
         "host": _host_fingerprint(),
         "backend": {"name": capabilities.backend,
                     "capabilities": capabilities.to_dict()},
+        "run_config": run_config or {"trials": 1, "task_field": "prompt", "llm": None},
         "scenarios": [_scenario_dict(o) for o in outcomes],
+        "families": _families(outcomes),
         "summary": _summary(outcomes),
     }
+    if scrubber:
+        report = scrubber.deep(report)
 
     entries, head = _compute_chain(_chain_records(report))
     report["chain"] = {"algorithm": "sha256-chain", "genesis": GENESIS,
@@ -194,7 +310,12 @@ def verify_report(report: dict) -> VerifyResult:
     stored_chain = report.get("chain") or {}
     stored_head = stored_chain.get("head")
 
-    entries, head = _compute_chain(_chain_records(report))
+    try:
+        entries, head = _compute_chain(_chain_records(report))
+    except (AttributeError, TypeError, ValueError) as exc:
+        return VerifyResult(ok=False, chain_ok=False, signature_status="unverifiable",
+                            head_stored=stored_head, head_recomputed=None,
+                            problems=[f"malformed report structure: {exc}"])
     chain_ok = head == stored_head
     if not chain_ok:
         problems.append(
@@ -215,7 +336,7 @@ def verify_report(report: dict) -> VerifyResult:
                         "cannot check the ed25519 signature")
     else:
         try:
-            valid = verify_signature(sig["public_key"], bytes.fromhex(stored_head),
+            valid = verify_signature(sig["public_key"], bytes.fromhex(str(stored_head)),
                                      sig["signature"])
         except Exception as exc:  # malformed signature material
             valid = False

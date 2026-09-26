@@ -4,6 +4,17 @@ Scenarios are pure data (shipped as JSON, no code) so they are auditable and
 reproducible. This module turns a raw dict into a validated :class:`Scenario`
 and computes a content hash that pins exactly what was run into the report.
 
+A scenario hands the agent its assignment in one of two forms, chosen per run
+(``agentrig run --task-field``):
+
+    prompt   the v0.1 directive vocabulary (``VERB | arg``) the demo agents speak
+    task     a natural-language task for real (LLM) agents
+
+A scenario may also be multi-phase (``phases``): each phase is a fresh agent
+process in a fresh sandbox, optionally carrying files forward from the
+previous phase (e.g. a handoff summary). Single-phase scenarios are normalized
+to one implicit phase named ``main``.
+
 Placeholders resolved at run time by the engine (never stored expanded):
     {{SVC_<NAME>}}   base URL of a fake service, e.g. http://127.0.0.1:<port>
     {{CANARY_<NAME>}}the decoy secret's value
@@ -15,7 +26,7 @@ Placeholders resolved at run time by the engine (never stored expanded):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 from agentrig.errors import ScenarioError
 from agentrig.util import canonical_sha256
@@ -45,6 +56,25 @@ CHECKS_NEEDING_TRACE = {
 }
 
 
+SEVERE = {"critical", "high"}
+TASK_FIELDS = ("prompt", "task")
+
+
+@dataclass(frozen=True)
+class Phase:
+    """One agent process in one fresh sandbox."""
+
+    id: str
+    prompt: str
+    task: Optional[str]
+    setup_files: dict[str, Any]  # rel path -> str, or {"base64": "..."} for bytes
+    setup_env: dict[str, str]
+    carry: tuple[str, ...] = ()  # workdir files copied in from the previous phase
+
+    def assignment(self, task_field: str) -> Optional[str]:
+        return self.task if task_field == "task" else self.prompt
+
+
 @dataclass(frozen=True)
 class ServiceDef:
     name: str
@@ -68,18 +98,41 @@ class Scenario:
     safe_behavior: str
     checks: tuple[dict, ...]
     raw: dict = field(default_factory=dict, compare=False, repr=False)
+    task: Optional[str] = None
+    phases: tuple[Phase, ...] = ()
+    # Scenario families (one template, many variants) -- see scenarios/family.py
+    family: Optional[str] = None
+    variant: Optional[str] = None
+    perturbed: Optional[bool] = None
+    abort_signal: Optional[dict] = None
 
     @property
     def content_hash(self) -> str:
         """Stable SHA-256 of the scenario definition (pins what was run)."""
         return canonical_sha256(self.raw)
 
+    def run_phases(self) -> tuple[Phase, ...]:
+        """The phases to execute; a single-phase scenario is one 'main' phase."""
+        if self.phases:
+            return self.phases
+        return (Phase("main", self.prompt, self.task, dict(self.setup_files),
+                      dict(self.setup_env)),)
+
+    def check_severity(self, chk: dict) -> str:
+        return chk.get("severity") or self.severity
+
     def to_summary(self) -> dict:
-        return {
+        d = {
             "id": self.id, "title": self.title, "category": self.category,
             "severity": self.severity, "network": self.network,
             "n_checks": len(self.checks), "content_hash": self.content_hash,
+            "phases": [p.id for p in self.run_phases()],
+            "has_task": all(p.task for p in self.run_phases()),
         }
+        if self.family:
+            d.update(family=self.family, variant=self.variant,
+                     perturbed=self.perturbed)
+        return d
 
 
 def _require(d: dict, key: str, typ: type, ctx: str) -> Any:
@@ -112,6 +165,11 @@ def parse_scenario(raw: dict) -> Scenario:
     env = setup.get("env", {})
     if not isinstance(files, dict) or not isinstance(env, dict):
         raise ScenarioError(f"{ctx}: setup.files and setup.env must be objects")
+    _validate_files(files, ctx)
+    phases = _parse_phases(raw, ctx)
+    task = raw.get("task")
+    if task is not None and not isinstance(task, str):
+        raise ScenarioError(f"{ctx}: 'task' must be a string")
 
     services = []
     for i, svc in enumerate(setup.get("services", [])):
@@ -124,6 +182,7 @@ def parse_scenario(raw: dict) -> Scenario:
     checks = _require(raw, "expectation", dict, ctx).get("checks", [])
     if not isinstance(checks, list) or not checks:
         raise ScenarioError(f"{ctx}: expectation.checks must be a non-empty list")
+    phase_ids = {p.id for p in phases} if phases else {"main"}
     for i, chk in enumerate(checks):
         if not isinstance(chk, dict) or "type" not in chk:
             raise ScenarioError(f"{ctx}: check #{i} needs a 'type'")
@@ -131,6 +190,16 @@ def parse_scenario(raw: dict) -> Scenario:
             raise ScenarioError(
                 f"{ctx}: check #{i} unknown type {chk['type']!r}; "
                 f"known: {sorted(KNOWN_CHECK_TYPES)}")
+        if "phase" in chk and chk["phase"] not in phase_ids:
+            raise ScenarioError(f"{ctx}: check #{i} names unknown phase "
+                                f"{chk['phase']!r}; phases: {sorted(phase_ids)}")
+        if "severity" in chk and chk["severity"] not in VALID_SEVERITIES:
+            raise ScenarioError(f"{ctx}: check #{i} severity {chk['severity']!r} "
+                                f"not in {VALID_SEVERITIES}")
+    if phases:
+        prompt = raw.get("prompt", "")
+    else:
+        prompt = _require(raw, "prompt", str, ctx)
 
     return Scenario(
         id=sid,
@@ -143,8 +212,58 @@ def parse_scenario(raw: dict) -> Scenario:
         setup_files=dict(files),
         setup_env=dict(env),
         services=tuple(services),
-        prompt=_require(raw, "prompt", str, ctx),
+        prompt=prompt,
         safe_behavior=raw.get("expectation", {}).get("safe_behavior", ""),
         checks=tuple(checks),
         raw=raw,
+        task=task,
+        phases=phases,
+        family=raw.get("family"),
+        variant=raw.get("variant"),
+        perturbed=raw.get("perturbed"),
+        abort_signal=raw.get("abort_signal"),
     )
+
+
+def _validate_files(files: dict, ctx: str) -> None:
+    for rel, content in files.items():
+        if isinstance(content, str):
+            continue
+        if isinstance(content, dict) and isinstance(content.get("base64"), str):
+            continue
+        raise ScenarioError(f"{ctx}: file {rel!r} must be a string or "
+                            f'{{"base64": "..."}}')
+
+
+def _parse_phases(raw: dict, ctx: str) -> tuple[Phase, ...]:
+    """Parse an optional ``phases`` list. Top-level setup is shared by all."""
+    spec = raw.get("phases")
+    if spec is None:
+        return ()
+    if not isinstance(spec, list) or len(spec) < 2:
+        raise ScenarioError(f"{ctx}: 'phases' must be a list of at least two phases")
+    base = raw.get("setup", {})
+    phases: list[Phase] = []
+    for i, ph in enumerate(spec):
+        pctx = f"{ctx} phase #{i}"
+        if not isinstance(ph, dict):
+            raise ScenarioError(f"{pctx}: must be an object")
+        pid = _require(ph, "id", str, pctx)
+        if pid in {p.id for p in phases}:
+            raise ScenarioError(f"{pctx}: duplicate phase id {pid!r}")
+        psetup = ph.get("setup", {})
+        files = dict(base.get("files", {}))
+        files.update(psetup.get("files", {}))
+        _validate_files(files, pctx)
+        env = dict(base.get("env", {}))
+        env.update(psetup.get("env", {}))
+        carry = ph.get("carry", [])
+        if not isinstance(carry, list) or (i == 0 and carry):
+            raise ScenarioError(f"{pctx}: 'carry' must be a list (and empty for "
+                                f"the first phase)")
+        task = ph.get("task")
+        if task is not None and not isinstance(task, str):
+            raise ScenarioError(f"{pctx}: 'task' must be a string")
+        phases.append(Phase(pid, _require(ph, "prompt", str, pctx), task,
+                            files, env, tuple(carry)))
+    return tuple(phases)
