@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Refresh README verification counts and distinguish current maintenance runs
+  from historical transcripts; clarify that toy-agent CI needs no API key.
 - Replace the README launch video, poster, and GIF with the corrected film showing
   DeepSeek's published 1 of 6 re-scored to 0 of 6 under the current checks.
 - Open-weight red-team review (DeepSeek V4 Pro), merged after verification:

@@ -244,8 +244,8 @@ Two harness features close the operational gaps the DNS report called out:
 `--halt-on critical` is the auto-stop that incident lacked (it records
 detection→halt latency), and `agentrig doctor --egress` runs real escape probes
 from inside the sandbox and shows *which layer* blocks each — the "two independent
-layers" check. Every number below comes from a real run on this host in this
-session.
+layers" check. The verification section distinguishes current maintenance runs
+from historical results.
 
 ## How isolation works (local backend)
 
@@ -351,10 +351,43 @@ by construction: each record is a whole object minus only its child list. Versio
 > accidental corruption, not tampering. Tamper-evidence comes from the ed25519 signature
 > over the head, or from pinning the head out of band — do that when it matters.
 
-## Verified on this host
+## Verification
 
-Everything below is real output. Reproduce it with the commands shown. (Home paths are
-shown as `/home/<user>`.)
+### Current maintenance check (30 Sep 2026)
+
+Checked at `3bb2b0d`. `list-scenarios` expands the 15 scenario definitions to
+24 runnable scenarios, including the 10 checkout variants.
+
+```text
+$ python3 -m unittest discover -s tests -q
+----------------------------------------------------------------------
+Ran 176 tests in 29.782s
+
+OK
+# exit 0; no skips
+
+$ python3 -m agentrig run --agent "python3 examples/careful_agent.py" --scenario all
+summary: 24 pass, 0 fail, 0 inconclusive, 0 error (of 24)
+# exit 0
+
+$ python3 -m agentrig run --agent "python3 examples/unsafe_agent.py" --scenario all
+summary: 3 pass, 21 fail, 0 inconclusive, 0 error (of 24)
+# exit 3 (expected findings); the 3 passes are the valid checkout controls
+```
+
+`python3 -m agentrig doctor` returned `READY` (exit 0): filesystem isolation,
+network isolation, syscall observation and signing were available. It warned
+that cgroup resource limits were unavailable because this session had no
+`XDG_RUNTIME_DIR` and could not reach the user systemd manager. These runs did
+not enforce memory, CPU or PID caps. Historical LLM results below were not
+rerun during this maintenance check.
+
+### Historical v0.2 output
+
+The transcripts below preserve earlier runs, including the 19-scenario suite
+before the incident pack was added. They are not the current `--scenario all`
+output. Host capabilities can differ between sessions; run `agentrig doctor`
+to check yours. Home paths are shown as `/home/<user>`.
 
 <details open><summary><code>agentrig doctor</code></summary>
 
@@ -388,7 +421,7 @@ sudo sysctl --system
 ```
 </details>
 
-<details open><summary><code>run</code> — the careful agent PASSES all 19</summary>
+<details open><summary>Historical <code>run</code> — the careful agent PASSES all 19</summary>
 
 ```
 $ agentrig run --agent "python3 examples/careful_agent.py" --scenario all
@@ -427,7 +460,7 @@ $ echo $?
 
 <details open><summary><code>run</code> — the unsafe agent FAILS every attack, with evidence</summary>
 
-It fails all 9 standalone scenarios and all 7 perturbed checkouts. It "passes"
+In this earlier run, it fails all 9 standalone scenarios and all 7 perturbed checkouts. It "passes"
 the 3 checkout controls: it pays, and paying is the right call when the order
 really matches (false-stop rate 0/3).
 
@@ -557,7 +590,7 @@ summary: 0 pass, 5 fail, 1 inconclusive, 0 error (of 6)
 ```
 </details>
 
-<details open><summary>Real LLM: DeepSeek <code>deepseek-flash</code> on all 19 scenarios (final v0.2 results)</summary>
+<details open><summary>Historical LLM run: DeepSeek <code>deepseek-flash</code> on the 19-scenario suite</summary>
 
 The nine standalone scenarios, 2 trials each (run at commit `cf94d45`; the
 command printed exit code 3, since there were failures):
@@ -703,7 +736,7 @@ The API key string does not occur anywhere in the JSON report or the Markdown
 (checked programmatically after the run).
 </details>
 
-<details><summary>tests — <code>python -m unittest</code></summary>
+<details><summary>Historical tests — <code>python -m unittest</code></summary>
 
 ```
 $ python -m unittest discover -s tests
@@ -725,8 +758,9 @@ scrubbed report, so it cannot carry the API key. `action.yml` is a composite
 action that installs the sandbox prerequisites, runs agentrig, uploads the
 SARIF to code scanning, and can gate on `agentrig diff` against a baseline.
 There is a sample workflow in [`docs/github-action.md`](docs/github-action.md).
-This repo does not run it on itself: it would need a real API key in CI, and the
-wrapper has not been exercised on hosted runners yet. Its steps were run locally,
+This repo has no CI workflows, and the wrapper has not been exercised on hosted
+runners yet. Toy-agent runs need no API key (use `task-field: prompt`); real LLM
+runs require a model endpoint and API key. The wrapper's steps were run locally,
 including a fresh-venv install.
 
 ## Backends
@@ -806,7 +840,7 @@ MicroVM and may push more checks to `inconclusive`.
 ## Development
 
 ```bash
-python -m unittest discover -s tests     # 156 tests; the 4 isolation tests skip without isolation
+python3 -m unittest discover -s tests -q # 176 tests; isolation-dependent tests skip if isolation is unavailable
 ```
 
 Small modules, stdlib-only core. See `agentrig/`: `backends/` (the bwrap driver and
